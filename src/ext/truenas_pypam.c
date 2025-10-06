@@ -132,14 +132,14 @@ PyModuleDef truenas_pypam_module = {
 // Generic function to get module state. NULL for module_in is OK
 tnpam_state_t *py_get_pam_state(PyObject *module_in)
 {
-        PyObject *modref = module_in;
+	PyObject *modref = module_in;
 	tnpam_state_t *state = NULL;
 
-        if (modref == NULL) {
+	if (modref == NULL) {
 		// this is a borrowed referece. does not need decref
-                modref = PyState_FindModule(&truenas_pypam_module);
+		modref = PyState_FindModule(&truenas_pypam_module);
 		PYPAM_ASSERT((modref != NULL), "Failed to get module");
-        }
+	}
 
 	state = (tnpam_state_t *)PyModule_GetState(modref);
 	PYPAM_ASSERT((state != NULL), "Failed to get module state");
