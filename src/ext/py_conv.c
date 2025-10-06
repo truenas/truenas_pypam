@@ -138,15 +138,15 @@ PyObject *py_pam_messages_parse(int num_msg, const struct pam_message **msg)
 	PyObject *out = NULL;
 	tnpam_state_t *state = NULL;
 	int i;
-	PyObject *l = NULL;
+	PyObject *msgs = NULL;
 
 	state = py_get_pam_state(NULL);
 	if (state == NULL) {
 		return NULL;
 	}
 
-	l = PyList_New(0);
-	if (l == NULL) {
+	msgs = PyList_New(0);
+	if (msgs == NULL) {
 		return NULL;
 	}
 
@@ -157,19 +157,19 @@ PyObject *py_pam_messages_parse(int num_msg, const struct pam_message **msg)
 
 		entry = py_pam_msg(state, msg[i]);
 		if (entry == NULL) {
-			Py_CLEAR(l);
+			Py_CLEAR(msgs);
 			return NULL;
 		}
 
-		ret = PyList_Append(l, entry);
+		ret = PyList_Append(msgs, entry);
 		Py_CLEAR(entry);
 		if (ret != 0) {
-			Py_CLEAR(l);
+			Py_CLEAR(msgs);
 			return NULL;
 		}
 	}
-	out = PyList_AsTuple(l);
-	Py_CLEAR(l);
+	out = PyList_AsTuple(msgs);
+	Py_CLEAR(msgs);
 	return out;
 }
 

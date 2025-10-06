@@ -43,8 +43,8 @@ typedef int boolean_t;
 } while (0);
 
 #define PYPAM_UNLOCK(ctx) do { \
-	pthread_mutex_unlock(&ctx->pam_hdl_lock); \
 	PyEval_RestoreThread(ctx->_save); \
+	pthread_mutex_unlock(&ctx->pam_hdl_lock); \
 } while (0);
 
 

@@ -257,7 +257,7 @@ def test_login_without_auth():
     auth = UserPamAuthenticator(username=TEST_USER)
 
     with pytest.raises(RuntimeError) as exc_info:
-        auth.login('session123')
+        auth.login()
 
     assert "unexpected authenticator run state" in str(exc_info.value)
 

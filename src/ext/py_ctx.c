@@ -29,7 +29,8 @@ py_tnpam_ctx_init(tnpam_ctx_t *self, PyObject *args, PyObject *kwds)
 		NULL
 	};
 	tnpam_cfg_t cfg = { .service = "login", };
-	pamcode_t ret;
+	pamcode_t ret, err = 0;
+	const char *msg = NULL;
 
 	if (!PyArg_ParseTupleAndKeywords(args, kwds, "|$ssOOsssI", kwlist,
 					 &cfg.service,
@@ -69,10 +70,33 @@ py_tnpam_ctx_init(tnpam_ctx_t *self, PyObject *args, PyObject *kwds)
 		return -1;
 	}
 
+	Py_BEGIN_ALLOW_THREADS
 	ret = pam_start_confdir(cfg.service, cfg.user, &self->conv,
 				cfg.cdir, &self->hdl);
+
 	if (ret != PAM_SUCCESS) {
-		set_pam_exc(ret, "pam_start_confdir() failed");
+		msg = "pam_start_confdir() failed";
+	} else if ((ret = pam_set_item(self->hdl, PAM_RUSER, cfg.ruser)) != PAM_SUCCESS) {
+		msg = "pam_set_item() failed for PAM_RUSER";
+	} else if ((ret = pam_set_item(self->hdl, PAM_RHOST, cfg.rhost)) != PAM_SUCCESS) {
+		msg = "pam_set_item() failed for PAM_HOST";
+	} else if (cfg.fail_delay &&
+		   ((ret = pam_fail_delay(self->hdl, cfg.fail_delay) != PAM_SUCCESS))) {
+		msg = "pam_fail_delay() failed";
+	} else {
+		err = pthread_mutex_init(&self->pam_hdl_lock, NULL);
+	}
+	Py_END_ALLOW_THREADS
+
+	if (ret != PAM_SUCCESS) {
+		set_pam_exc(ret, msg);
+		return -1;
+	}
+
+	if (err) {
+		PyErr_Format(PyExc_RuntimeError,
+			     "pthread_muex_init() failed for pam_hdl_lock: %s",
+			     strerror(errno));
 		return -1;
 	}
 
@@ -84,27 +108,6 @@ py_tnpam_ctx_init(tnpam_ctx_t *self, PyObject *args, PyObject *kwds)
 
 	// Initialize last_pam_result to PAM_SUCCESS
 	self->last_pam_result = PAM_SUCCESS;
-
-	ret = pam_set_item(self->hdl, PAM_RUSER, cfg.ruser);
-	if (ret != PAM_SUCCESS) {
-		set_pam_exc(ret, "pam_set_item() failed for PAM_RUSER");
-		return -1;
-	}
-
-	ret = pam_set_item(self->hdl, PAM_RHOST, cfg.rhost);
-	if (ret != PAM_SUCCESS) {
-		set_pam_exc(ret, "pam_set_item() failed for PAM_RHOST");
-		return -1;
-	}
-
-	if (cfg.fail_delay) {
-		ret = pam_fail_delay(self->hdl, cfg.fail_delay);
-		if (ret != PAM_SUCCESS) {
-			set_pam_exc(ret, "pam_fail_delay() failed");
-			return -1;
-		}
-	}
-
 	return 0;
 }
 
@@ -115,6 +118,7 @@ py_tnpam_ctx_dealloc(tnpam_ctx_t *self)
 		pam_end(self->hdl, self->last_pam_result);
 		self->hdl = NULL;
 	}
+	pthread_mutex_destroy(&self->pam_hdl_lock);
 	Py_CLEAR(self->user);
 	Py_CLEAR(self->conv_data.callback_fn);
 	Py_CLEAR(self->conv_data.private_data);
@@ -122,6 +126,12 @@ py_tnpam_ctx_dealloc(tnpam_ctx_t *self)
 	// conv.appdata_ptr is a borrowed reference, no need to clear
 
 	Py_TYPE(self)->tp_free((PyObject *)self);
+}
+
+static
+PyObject *py_tnpam_ctx_messages(tnpam_ctx_t *self, PyObject *Py_UNUSED(ignored))
+{
+	return PyList_AsTuple(self->conv_data.messages);
 }
 
 static PyMethodDef py_tnpam_ctx_methods[] = {
@@ -178,6 +188,11 @@ static PyMethodDef py_tnpam_ctx_methods[] = {
 		.ml_meth = (PyCFunction)py_tnpam_close_session,
 		.ml_flags = METH_VARARGS | METH_KEYWORDS,
 		.ml_doc = py_tnpam_close_session__doc__,
+	},
+	{
+		.ml_name = "messages",
+		.ml_meth = (PyCFunction)py_tnpam_ctx_messages,
+		.ml_flags = METH_NOARGS,
 	},
 	{NULL}
 };

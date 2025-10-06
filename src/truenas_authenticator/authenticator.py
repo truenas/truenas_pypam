@@ -383,7 +383,7 @@ class UserPamAuthenticator:
         self._thread_state = None
         self._auth_thread = None
 
-    def login(self, session_id: str) -> AuthenticatorResponse:
+    def login(self) -> AuthenticatorResponse:
         """Perform login operations including opening session."""
         self.check_stage(AuthenticatorStage.LOGIN)
 
