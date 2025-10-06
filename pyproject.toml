@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "truenas_pypam"
+version = "0.1.0"
+description = "TrueNAS pam client module"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+    {name = "Andrew Walker"},
+]
+license = {text = "LGPL-3.0-or-later"}
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: C",
+    "Operating System :: POSIX :: Linux",
+    "Topic :: System :: Systems Administration"
+]
+
+[tool.setuptools]
+packages = ["truenas_authenticator"]
+package-dir = {"truenas_authenticator" = "src/truenas_authenticator"}
