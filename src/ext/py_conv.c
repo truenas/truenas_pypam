@@ -185,6 +185,11 @@ void free_pam_resp(int num_msg, struct pam_response *reply_array)
 	free(reply_array);
 }
 
+/*
+ * This function takes the python callback response (which should be an iterable)
+ * and converts it into an array of struct pam_response responses from the application
+ * to the PAM stack.
+ */
 static
 bool parse_py_pam_resp(int num_msg, struct pam_response **resp, PyObject *pyresp)
 {
@@ -199,14 +204,19 @@ bool parse_py_pam_resp(int num_msg, struct pam_response **resp, PyObject *pyresp
 	// or strings.
 	iterator = PyObject_GetIter(pyresp);
 	if (iterator == NULL) {
+		// We expected an iterable and didn't get it. Python exception
+		// will be set in this case.
 		return false;
 	}
 
 	// PAM expects one response per input message. We'll hope that library
-	// consumer keeps order correct.
+	// consumer keeps order correct.  We *must* use regular malloc rather
+	// than PyMem_Raw interface because the memory will be freed by the
+	// PAM service module stack.
 	reply = calloc(num_msg, sizeof(struct pam_response));
 	if (reply == NULL) {
 		Py_DECREF(iterator);
+		PyErr_NoMemory();
 		return false;
 	}
 
@@ -265,6 +275,9 @@ bool parse_py_pam_resp(int num_msg, struct pam_response **resp, PyObject *pyresp
 }
 
 /* pam_conv_t wrapper.
+ *
+ * This is the hard-coded C callback function which will in turn call our supplied python
+ * callback function.
  *
  * The appdata_ptr will be the actual tnpam_ctx_t that started the
  * converstation. There is a conversation-specific struct that contains
