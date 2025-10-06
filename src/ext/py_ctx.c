@@ -59,12 +59,21 @@ py_tnpam_ctx_init(tnpam_ctx_t *self, PyObject *args, PyObject *kwds)
 		return -1;
 	}
 
+	// truenas_pam_conv is the hard-coded C callback function that wraps around the
+	// provided python callback function in self->conv_data.callback_fn.
 	self->conv.conv = truenas_pam_conv;
+
+	// the appdata_ptr provided to pam_start() is actually a borrowed reference to
+	// the current object. This provides access to handle python state, mutex, etc
+	// within truenas_pam_conv and also allows the *user-provided* private_data to
+	// the user-provided callback function
 	self->conv.appdata_ptr = (void *)self;  // Use borrowed reference
 	self->conv_data.callback_fn = Py_NewRef(cfg.conv_fn);
 	self->conv_data.private_data = cfg.private_data ?
 				       Py_NewRef(cfg.private_data) :
 				       Py_NewRef(Py_None);
+
+	// history of messages received from PAM service modules.
 	self->conv_data.messages = PyList_New(0);
 	if (self->conv_data.messages == NULL) {
 		return -1;
