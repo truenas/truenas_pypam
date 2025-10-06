@@ -91,6 +91,9 @@ PyStructSequence_Desc struct_pam_msg_desc = {
 	.n_in_sequence = 2
 };
 
+#define MSG_STYLE_IDX 0
+#define MSG_DATA_IDX 1
+
 static
 PyObject *py_pam_msg(tnpam_state_t *state, const struct pam_message *msg)
 {
@@ -109,7 +112,7 @@ PyObject *py_pam_msg(tnpam_state_t *state, const struct pam_message *msg)
 		Py_CLEAR(entry);
 		return NULL;
 	}
-	PyStructSequence_SET_ITEM(entry, 1, value);
+	PyStructSequence_SET_ITEM(entry, MSG_DATA_IDX, value);
 
 	// Create MSGStyle enum member for msg_style
 	PYPAM_ASSERT((state->msg_style_enum != NULL), "MSGStyle enum not initialized");
@@ -127,7 +130,7 @@ PyObject *py_pam_msg(tnpam_state_t *state, const struct pam_message *msg)
 		Py_CLEAR(entry);
 		return NULL;
 	}
-	PyStructSequence_SET_ITEM(entry, 0, style_enum_member);
+	PyStructSequence_SET_ITEM(entry, MSG_SYTLE_IDX, style_enum_member);
 
 	return entry;
 }
