@@ -342,6 +342,10 @@ cleanup:
 	return retval;
 }
 
+/*
+ * Initialize python structs and enums related to pam conversations and store
+ * references in the module state.
+ */
 bool init_pam_conv_struct(PyObject *module_ref)
 {
 	PyTypeObject *obj = NULL;
