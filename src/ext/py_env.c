@@ -119,7 +119,6 @@ py_tnpam_envlist(tnpam_ctx_t *self, PyObject *Py_UNUSED(ignored))
 	out = PyDict_New();
 	if (out == NULL) {
 		goto cleanup;
-		return NULL;
 	}
 
 	for (i = 0, envar = *pamenv; (envar = pamenv[i]) != NULL; i++) {
