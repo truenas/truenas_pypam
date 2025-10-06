@@ -130,7 +130,7 @@ PyObject *py_pam_msg(tnpam_state_t *state, const struct pam_message *msg)
 		Py_CLEAR(entry);
 		return NULL;
 	}
-	PyStructSequence_SET_ITEM(entry, MSG_SYTLE_IDX, style_enum_member);
+	PyStructSequence_SET_ITEM(entry, MSG_STYLE_IDX, style_enum_member);
 
 	return entry;
 }
