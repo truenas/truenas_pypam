@@ -185,6 +185,7 @@ void free_pam_resp(int num_msg, struct pam_response *reply_array)
 	free(reply_array);
 }
 
+static
 bool parse_py_pam_resp(int num_msg, struct pam_response **resp, PyObject *pyresp)
 {
 	struct pam_response *reply = NULL;
