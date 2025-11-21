@@ -60,7 +60,7 @@ class AuthenticatorState:
     """ Messages received during PAM conversation """
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class AuthenticatorResponse:
     stage: AuthenticatorStage
     code: truenas_pypam.PAMCode  # PAM response code
@@ -134,9 +134,6 @@ def _auth_thread_worker(thread_state: ConversationThreadState):
         # Perform authentication
         ctx.authenticate()
 
-        # Check account validity
-        ctx.acct_mgmt()
-
         # Store context on success
         thread_state.pam_context = ctx
 
@@ -172,6 +169,21 @@ def _conv_callback(ctx, messages, private_data: ConversationThreadState):
 
     # If done event is set, return empty responses
     return [None] * len(messages)
+
+
+def _conv_callback_simple(ctx, messages, private_data):
+    reply = []
+    for m in messages:
+        if m.msg_style == truenas_pypam.MSGStyle.PAM_PROMPT_ECHO_OFF:
+            resp = private_data['password']
+        elif m.msg_style == truenas_pypam.MSGStyle.PAM_PROMPT_ECHO_ON:
+            resp = private_data['username']
+        else:
+            resp = None
+
+        reply.append(resp)
+
+    return reply
 
 
 class UserPamAuthenticator:
@@ -249,27 +261,22 @@ class UserPamAuthenticator:
             else:
                 code = truenas_pypam.PAMCode.PAM_SYSTEM_ERR
                 reason = str(self._thread_state.exception)
+
             self.end()
             return AuthenticatorResponse(AuthenticatorStage.AUTH, code, reason)
-        else:
-            # Success - set context from thread
-            self.ctx = self._thread_state.pam_context
-            self.state.stage = AuthenticatorStage.LOGIN
-            user_info = {
-                'pw_name': self.username,
-                'account_attributes': []
-            }
-            if self.state.service == 'middleware-api-key':
-                user_info['account_attributes'].append(
-                    AccountFlag.API_KEY
-                )
 
-            return AuthenticatorResponse(
-                AuthenticatorStage.AUTH,
-                truenas_pypam.PAMCode.PAM_SUCCESS,
-                None,
-                user_info
-            )
+        self.ctx = self._thread_state.pam_context
+        self.state.stage = AuthenticatorStage.LOGIN
+        user_info = {
+            'pw_name': self.username,
+            'account_attributes': []
+        }
+        return AuthenticatorResponse(
+            AuthenticatorStage.AUTH,
+            truenas_pypam.PAMCode.PAM_SUCCESS,
+            None,
+            user_info
+        )
 
     def auth_init(self) -> AuthenticatorResponse:
         """
@@ -303,7 +310,6 @@ class UserPamAuthenticator:
         self._auth_thread = threading.Thread(
             target=_auth_thread_worker,
             args=(self._thread_state,),
-            daemon=True
         )
         self._auth_thread.start()
 
@@ -329,6 +335,26 @@ class UserPamAuthenticator:
         self._thread_state.input_queue.put(responses)
 
         return self._wait_for_auth_result()
+
+    def account_management(self) -> AuthenticatorResponse:
+        self.check_stage(AuthenticatorStage.LOGIN)
+
+        if not self.ctx:
+            raise RuntimeError(
+                "No PAM context available - authentication may not have completed"
+            )
+
+        try:
+            self.ctx.acct_mgmt()
+            code = truenas_pypam.PAMCode.PAM_SUCCESS
+            reason = None
+        except truenas_pypam.PAMError as e:
+            code = e.code
+            reason = str(e)
+
+        # The account management and authentication stages blend together in some
+        # modules and so we keep it as same stage
+        return AuthenticatorResponse(AuthenticatorStage.AUTH, code, reason)
 
     def open_session(self) -> AuthenticatorResponse:
         """Open PAM session."""
@@ -374,12 +400,13 @@ class UserPamAuthenticator:
             if self._auth_thread and self._auth_thread.is_alive():
                 self._auth_thread.join(timeout=2.0)
 
-        if self.ctx is not None:
-            # PAM context will be cleaned up when garbage collected
-            self.ctx = None
+            self._thread_state.input_queue.shutdown(immediate=True)
+            self._thread_state.output_queue.shutdown(immediate=True)
+            self._thread_state.pam_context = None
 
         # Reset state
         self.state = AuthenticatorState(service=self.state.service)
+        self.ctx = None
         self._thread_state = None
         self._auth_thread = None
 
@@ -419,21 +446,83 @@ class UserPamAuthenticator:
         return self.state.login_at
 
     def __del__(self):
-        """Cleanup when garbage collected."""
         if self.state.stage is AuthenticatorStage.LOGOUT:
             try:
                 self.logout()
             except Exception:
                 pass
 
+        else:
+            self.end()
+
         self.state = None
 
 
 class SimpleAuthenticator(UserPamAuthenticator):
     """Simple authenticator with basic username/password authentication."""
-    def __init__(self, *, username: str, password: str, service: str = 'login'):
-        super().__init__(username=username, service=service)
-        self.password = password
+    def __init__(self, **kwargs):
+        self.password = kwargs.pop('password', '')
+        super().__init__(**kwargs)
+
+    def auth_init(self) -> AuthenticatorResponse:
+        """ Perform simple username / password authentication with credentials
+        provided in the init method """
+        self.check_stage(AuthenticatorStage.START)
+
+        pam_ctx_args = {
+            'user': self.username,
+            'conversation_function': _conv_callback_simple,
+            # Pass thread_state as private data
+            'conversation_private_data': {
+                'username': self.username,
+                'password': self.password
+            },
+            'service_name': self.state.service
+        }
+
+        if self.rhost is not None:
+            pam_ctx_args['rhost'] = self.rhost
+        if self.ruser is not None:
+            pam_ctx_args['ruser'] = self.ruser
+        if self.fail_delay:
+            pam_ctx_args['fail_delay'] = self.fail_delay
+
+        ctx = truenas_pypam.get_context(**pam_ctx_args)
+
+        if self.pam_env:
+            for key, value in self.pam_env.items():
+                ctx.set_env(name=key, value=value)
+
+        try:
+            ctx.authenticate()
+        except Exception as exc:
+            reason = str(exc)
+            if isinstance(exc, truenas_pypam.PAMError):
+                code = exc.code
+            else:
+                code = truenas_pypam.PAMCode.PAM_SYSTEM_ERR
+
+            return AuthenticatorResponse(AuthenticatorStage.AUTH, code, reason)
+        finally:
+            self.password = None
+
+        self.ctx = ctx
+        self.state.stage = AuthenticatorStage.LOGIN
+
+        user_info = {
+            'pw_name': self.username,
+            'account_attributes': []
+        }
+
+        return AuthenticatorResponse(
+            stage=AuthenticatorStage.AUTH,
+            code=truenas_pypam.PAMCode.PAM_SUCCESS,
+            reason=None,
+            user_info = user_info
+        )
+
+    def auth_continue(self) ->AuthenticatorResponse:
+        raise NotImplementedError
 
     def authenticate_simple(self) -> bool:
         """
@@ -441,21 +530,4 @@ class SimpleAuthenticator(UserPamAuthenticator):
         Returns True/False.
         """
         resp = self.auth_init()
-
-        while resp.code == truenas_pypam.PAMCode.PAM_CONV_AGAIN:
-            if resp.reason:
-                # Auto-respond to prompts
-                responses = []
-                for msg in resp.reason:
-                    if msg.msg_style == truenas_pypam.MSGStyle.PAM_PROMPT_ECHO_OFF:
-                        responses.append(self.password)
-                    elif msg.msg_style == truenas_pypam.MSGStyle.PAM_PROMPT_ECHO_ON:
-                        responses.append(self.username)
-                    else:
-                        responses.append(None)
-                resp = self.auth_continue(responses)
-            else:
-                # No messages, wait for next state
-                resp = self.auth_continue([])
-
         return resp.code == truenas_pypam.PAMCode.PAM_SUCCESS
