@@ -76,7 +76,7 @@ py_tnpam_ctx_init(tnpam_ctx_t *self, PyObject *args, PyObject *kwds)
 	// history of messages received from PAM service modules.
 	self->conv_data.messages = PyList_New(0);
 	if (self->conv_data.messages == NULL) {
-		return -1;
+		goto cleanup;
 	}
 
 	Py_BEGIN_ALLOW_THREADS
@@ -99,25 +99,37 @@ py_tnpam_ctx_init(tnpam_ctx_t *self, PyObject *args, PyObject *kwds)
 
 	if (ret != PAM_SUCCESS) {
 		set_pam_exc(ret, msg);
-		return -1;
+		goto cleanup;
 	}
 
 	if (err) {
 		PyErr_Format(PyExc_RuntimeError,
 			     "pthread_muex_init() failed for pam_hdl_lock: %s",
 			     strerror(errno));
-		return -1;
+		goto cleanup;
 	}
 
 	// Store username for audit logging
 	self->user = PyUnicode_FromString(cfg.user);
 	if (self->user == NULL) {
-		return -1;
+		goto cleanup_mutex;
 	}
 
 	// Initialize last_pam_result to PAM_SUCCESS
 	self->last_pam_result = PAM_SUCCESS;
 	return 0;
+
+cleanup_mutex:
+	pthread_mutex_destroy(&self->pam_hdl_lock);
+cleanup:
+	if (self->hdl != NULL) {
+		pam_end(self->hdl, PAM_ABORT);
+		self->hdl = NULL;
+	}
+	Py_CLEAR(self->conv_data.callback_fn);
+	Py_CLEAR(self->conv_data.private_data);
+	Py_CLEAR(self->conv_data.messages);
+	return -1;
 }
 
 static void
