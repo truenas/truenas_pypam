@@ -23,25 +23,6 @@ class AuthenticatorStage(enum.StrEnum):
     LOGOUT = 'LOGOUT'
 
 
-class AccountFlag(enum.StrEnum):
-    # Account-specific flags
-    SYS_ADMIN = 'SYS_ADMIN'  # account is root or truenas_admin
-    # account is provided by a directory service
-    DIRECTORY_SERVICE = 'DIRECTORY_SERVICE'
-    # account is provided by the passwd file (and hopefully in our config)
-    LOCAL = 'LOCAL'
-    ACTIVE_DIRECTORY = 'ACTIVE_DIRECTORY'  # account is provided by AD
-    IPA = 'IPA'  # account is provided by FreeIPA
-    LDAP = 'LDAP'  # account is provided by ordinary LDAP server
-
-    # Flags about how authenticated
-    TWOFACTOR = '2FA'  # Account requires 2FA
-    API_KEY = 'API_KEY'  # Account authenticated by API key
-    OTPW = 'OTPW'  # Account authenticated by a single-use password
-    # Password change for account is required
-    PASSWORD_CHANGE_REQUIRED = 'PASSWORD_CHANGE_REQUIRED'
-
-
 @dataclass(slots=True)
 class AuthenticatorState:
     service: str = 'login'

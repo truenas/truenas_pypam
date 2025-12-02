@@ -143,6 +143,222 @@ PyObject *py_tnpam_ctx_messages(tnpam_ctx_t *self, PyObject *Py_UNUSED(ignored))
 	return PyList_AsTuple(self->conv_data.messages);
 }
 
+/* Getters and setters for PAM items */
+
+PyDoc_STRVAR(py_tnpam_ctx_user__doc__,
+"str or None: The PAM username (PAM_USER).\n\n"
+"This attribute corresponds to the PAM_USER item and represents the\n"
+"username of the entity being authenticated. The value is retrieved\n"
+"from the underlying PAM handle via pam_get_item(3).\n\n"
+"When setting this attribute, the value is updated in the PAM handle\n"
+"via pam_set_item(3).\n\n"
+"Raises\n"
+"------\n"
+"TypeError\n"
+"    If the value is not a string when setting.\n"
+"PAMError\n"
+"    If pam_set_item(3) or pam_get_item(3) fails.\n"
+);
+
+PyDoc_STRVAR(py_tnpam_ctx_ruser__doc__,
+"str or None: The PAM remote username (PAM_RUSER).\n\n"
+"This attribute corresponds to the PAM_RUSER item and represents the\n"
+"name of the remote user who is requesting service. This is typically\n"
+"used for services like rlogin where a user on one system requests\n"
+"access to another system. The value is retrieved from the underlying\n"
+"PAM handle via pam_get_item(3).\n\n"
+"When setting this attribute, the value is updated in the PAM handle\n"
+"via pam_set_item(3).\n\n"
+"Raises\n"
+"------\n"
+"TypeError\n"
+"    If the value is not a string when setting.\n"
+"PAMError\n"
+"    If pam_set_item(3) or pam_get_item(3) fails.\n"
+);
+
+PyDoc_STRVAR(py_tnpam_ctx_rhost__doc__,
+"str or None: The PAM remote host (PAM_RHOST).\n\n"
+"This attribute corresponds to the PAM_RHOST item and represents the\n"
+"name or address of the remote host from which the service request is\n"
+"originating. This can be a hostname, IPv4 address, or IPv6 address.\n"
+"The value is retrieved from the underlying PAM handle via\n"
+"pam_get_item(3).\n\n"
+"When setting this attribute, the value is updated in the PAM handle\n"
+"via pam_set_item(3).\n\n"
+"Raises\n"
+"------\n"
+"TypeError\n"
+"    If the value is not a string when setting.\n"
+"PAMError\n"
+"    If pam_set_item(3) or pam_get_item(3) fails.\n"
+);
+
+static PyObject *
+py_tnpam_ctx_get_user(tnpam_ctx_t *self, void *closure)
+{
+	const void *item = NULL;
+	pamcode_t ret;
+
+	PYPAM_LOCK(self);
+	ret = pam_get_item(self->hdl, PAM_USER, &item);
+	PYPAM_UNLOCK(self);
+
+	if (ret != PAM_SUCCESS) {
+		set_pam_exc(ret, "pam_get_item() failed for PAM_USER");
+		return NULL;
+	}
+
+	if (item == NULL) {
+		Py_RETURN_NONE;
+	}
+
+	return PyUnicode_FromString((const char *)item);
+}
+
+static int
+py_tnpam_ctx_set_user(tnpam_ctx_t *self, PyObject *value, void *closure)
+{
+	pamcode_t ret;
+	const char *str;
+
+	if (value == NULL) {
+		PyErr_SetString(PyExc_TypeError, "Cannot delete user attribute");
+		return -1;
+	}
+
+	if (!PyUnicode_Check(value)) {
+		PyErr_SetString(PyExc_TypeError, "user must be a string");
+		return -1;
+	}
+
+	str = PyUnicode_AsUTF8(value);
+	if (str == NULL) {
+		return -1;
+	}
+
+	PYPAM_LOCK(self);
+	ret = pam_set_item(self->hdl, PAM_USER, str);
+	PYPAM_UNLOCK(self);
+
+	if (ret != PAM_SUCCESS) {
+		set_pam_exc(ret, "pam_set_item() failed for PAM_USER");
+		return -1;
+	}
+
+	return 0;
+}
+
+static PyObject *
+py_tnpam_ctx_get_ruser(tnpam_ctx_t *self, void *closure)
+{
+	const void *item = NULL;
+	pamcode_t ret;
+
+	PYPAM_LOCK(self);
+	ret = pam_get_item(self->hdl, PAM_RUSER, &item);
+	PYPAM_UNLOCK(self);
+
+	if (ret != PAM_SUCCESS) {
+		set_pam_exc(ret, "pam_get_item() failed for PAM_RUSER");
+		return NULL;
+	}
+
+	if (item == NULL) {
+		Py_RETURN_NONE;
+	}
+
+	return PyUnicode_FromString((const char *)item);
+}
+
+static int
+py_tnpam_ctx_set_ruser(tnpam_ctx_t *self, PyObject *value, void *closure)
+{
+	pamcode_t ret;
+	const char *str;
+
+	if (value == NULL) {
+		PyErr_SetString(PyExc_TypeError, "Cannot delete ruser attribute");
+		return -1;
+	}
+
+	if (!PyUnicode_Check(value)) {
+		PyErr_SetString(PyExc_TypeError, "ruser must be a string");
+		return -1;
+	}
+
+	str = PyUnicode_AsUTF8(value);
+	if (str == NULL) {
+		return -1;
+	}
+
+	PYPAM_LOCK(self);
+	ret = pam_set_item(self->hdl, PAM_RUSER, str);
+	PYPAM_UNLOCK(self);
+
+	if (ret != PAM_SUCCESS) {
+		set_pam_exc(ret, "pam_set_item() failed for PAM_RUSER");
+		return -1;
+	}
+
+	return 0;
+}
+
+static PyObject *
+py_tnpam_ctx_get_rhost(tnpam_ctx_t *self, void *closure)
+{
+	const void *item = NULL;
+	pamcode_t ret;
+
+	PYPAM_LOCK(self);
+	ret = pam_get_item(self->hdl, PAM_RHOST, &item);
+	PYPAM_UNLOCK(self);
+
+	if (ret != PAM_SUCCESS) {
+		set_pam_exc(ret, "pam_get_item() failed for PAM_RHOST");
+		return NULL;
+	}
+
+	if (item == NULL) {
+		Py_RETURN_NONE;
+	}
+
+	return PyUnicode_FromString((const char *)item);
+}
+
+static int
+py_tnpam_ctx_set_rhost(tnpam_ctx_t *self, PyObject *value, void *closure)
+{
+	pamcode_t ret;
+	const char *str;
+
+	if (value == NULL) {
+		PyErr_SetString(PyExc_TypeError, "Cannot delete rhost attribute");
+		return -1;
+	}
+
+	if (!PyUnicode_Check(value)) {
+		PyErr_SetString(PyExc_TypeError, "rhost must be a string");
+		return -1;
+	}
+
+	str = PyUnicode_AsUTF8(value);
+	if (str == NULL) {
+		return -1;
+	}
+
+	PYPAM_LOCK(self);
+	ret = pam_set_item(self->hdl, PAM_RHOST, str);
+	PYPAM_UNLOCK(self);
+
+	if (ret != PAM_SUCCESS) {
+		set_pam_exc(ret, "pam_set_item() failed for PAM_RHOST");
+		return -1;
+	}
+
+	return 0;
+}
+
 static PyMethodDef py_tnpam_ctx_methods[] = {
 	{
 		.ml_name = "authenticate",
@@ -206,6 +422,31 @@ static PyMethodDef py_tnpam_ctx_methods[] = {
 	{NULL}
 };
 
+static PyGetSetDef py_tnpam_ctx_getsetters[] = {
+	{
+		.name = "user",
+		.get = (getter)py_tnpam_ctx_get_user,
+		.set = (setter)py_tnpam_ctx_set_user,
+		.doc = py_tnpam_ctx_user__doc__,
+		.closure = NULL,
+	},
+	{
+		.name = "ruser",
+		.get = (getter)py_tnpam_ctx_get_ruser,
+		.set = (setter)py_tnpam_ctx_set_ruser,
+		.doc = py_tnpam_ctx_ruser__doc__,
+		.closure = NULL,
+	},
+	{
+		.name = "rhost",
+		.get = (getter)py_tnpam_ctx_get_rhost,
+		.set = (setter)py_tnpam_ctx_set_rhost,
+		.doc = py_tnpam_ctx_rhost__doc__,
+		.closure = NULL,
+	},
+	{NULL}
+};
+
 PyDoc_STRVAR(PyPamCtx_Type__doc__,
 "PamContext(service_name='login', *, user, conversation_function,\n"
 "           conversation_private_data=None, confdir=None, rhost=None,\n"
@@ -234,5 +475,5 @@ PyTypeObject PyPamCtx_Type = {
 	.tp_dealloc = (destructor)py_tnpam_ctx_dealloc,
 	//.tp_repr = (reprfunc)py_tnpam_ctx_repr,
 	.tp_methods = py_tnpam_ctx_methods,
-	//.tp_getset = py_tnpam_ctx_getsetters,
+	.tp_getset = py_tnpam_ctx_getsetters,
 };
