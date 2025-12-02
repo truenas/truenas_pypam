@@ -12,7 +12,6 @@ from .authenticator import (
 
     # Enums and data classes
     AuthenticatorStage,
-    AccountFlag,
     AuthenticatorState,
     AuthenticatorResponse,
 )
@@ -22,7 +21,6 @@ __all__ = [
     'ApiKeyPamAuthenticator',
     'SimpleAuthenticator',
     'AuthenticatorStage',
-    'AccountFlag',
     'AuthenticatorState',
     'AuthenticatorResponse',
 ]

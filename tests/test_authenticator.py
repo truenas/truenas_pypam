@@ -6,7 +6,6 @@ from truenas_authenticator import (
     UserPamAuthenticator,
     SimpleAuthenticator,
     AuthenticatorStage,
-    AccountFlag
 )
 
 
@@ -209,14 +208,6 @@ def test_authenticator_response_fields():
     assert hasattr(resp, 'code')
     assert hasattr(resp, 'reason')
     assert hasattr(resp, 'user_info')
-
-
-def test_account_flag_values():
-    """Test AccountFlag enum values."""
-    assert AccountFlag.SYS_ADMIN == 'SYS_ADMIN'
-    assert AccountFlag.API_KEY == 'API_KEY'
-    assert AccountFlag.LOCAL == 'LOCAL'
-    assert AccountFlag.TWOFACTOR == '2FA'
 
 
 def test_authenticator_stage_values():
