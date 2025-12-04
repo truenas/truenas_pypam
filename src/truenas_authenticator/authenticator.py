@@ -112,11 +112,8 @@ def _auth_thread_worker(thread_state: ConversationThreadState):
             for key, value in thread_state.pam_env.items():
                 ctx.set_env(name=key, value=value)
 
-        # Perform authentication
-        ctx.authenticate()
-
-        # Store context on success
         thread_state.pam_context = ctx
+        ctx.authenticate()
 
     except Exception as e:
         thread_state.exception = e
@@ -243,7 +240,13 @@ class UserPamAuthenticator:
                 code = truenas_pypam.PAMCode.PAM_SYSTEM_ERR
                 reason = str(self._thread_state.exception)
 
-            self.end()
+            if self.state.otpw_possible:
+                # When this flag is set we want to keep the PAM context around
+                # until cleanup or explicit consumer call of self.end()
+                self.ctx = self._thread_state.pam_context
+            else:
+                self.end()
+
             return AuthenticatorResponse(AuthenticatorStage.AUTH, code, reason)
 
         self.ctx = self._thread_state.pam_context
