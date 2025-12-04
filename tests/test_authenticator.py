@@ -106,6 +106,7 @@ def test_auth_continue_with_correct_password():
 def test_auth_continue_with_wrong_password():
     """Test auth_continue with wrong password."""
     auth = UserPamAuthenticator(username=TEST_USER)
+    auth.state.otpw_possible=False
     resp = auth.auth_init()
 
     # Should get conversation request
