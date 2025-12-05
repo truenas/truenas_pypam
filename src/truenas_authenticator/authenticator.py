@@ -29,10 +29,8 @@ class AuthenticatorState:
     """ pam service name to be used for handle. """
     stage: AuthenticatorStage = AuthenticatorStage.START
     """ Stage of PAM session / conversation. """
-    otpw_possible: bool = True
+    otpw_possible: bool = False
     """ The authenticator supports authentication using single-use passwords. """
-    twofactor_possible: bool = True
-    """ The authenticator supports two-factor authentication """
     login_at: datetime | None = None
     """ Time at which session performed actual login """
     passwd: dict | None = None
