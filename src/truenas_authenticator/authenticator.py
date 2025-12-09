@@ -188,6 +188,7 @@ class UserPamAuthenticator:
         self.pam_env = pam_env or {}
         self.state = AuthenticatorState(service=service)
         # truenas_pypam context - only set after successful auth
+        self.dbid = 0
         self.ctx = None
         self._auth_thread = None
         self._thread_state = None
@@ -273,6 +274,13 @@ class UserPamAuthenticator:
 
         self.check_stage(AuthenticatorStage.START)
 
+        # When we're dealing with API keys, we pass concatenated username
+        # and API key ID to the PAM stack.
+        if self.dbid:
+            username = f'{self.username}:{self.dbid}'
+        else:
+            username = self.username
+
         # Create thread communication state with all PAM parameters
         self._thread_state = ConversationThreadState(
             main_thread_id=threading.current_thread().ident,
@@ -280,7 +288,7 @@ class UserPamAuthenticator:
             output_queue=queue.Queue(),
             done_event=threading.Event(),
             service_name=self.state.service,
-            user=self.username,
+            user=username,
             conversation_function=_conv_callback,
             rhost=self.rhost,
             ruser=self.ruser,
