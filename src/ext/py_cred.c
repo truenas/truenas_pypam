@@ -165,7 +165,9 @@ PyObject *py_tnpam_setcred(tnpam_ctx_t *self, PyObject *args, PyObject *kwds)
 	PYPAM_UNLOCK(self);
 
 	if (retval != PAM_SUCCESS) {
-		set_pam_exc(retval, "pam_setcred() failed");
+		if (!PyErr_Occurred()) {
+			set_pam_exc(retval, "pam_setcred() failed");
+		}
 		return NULL;
 	}
 

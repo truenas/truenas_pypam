@@ -117,6 +117,10 @@ py_tnpam_ctx_init(tnpam_ctx_t *self, PyObject *args, PyObject *kwds)
 
 	// Initialize last_pam_result to PAM_SUCCESS
 	self->last_pam_result = PAM_SUCCESS;
+
+	// Initialize _save to NULL - it will be set by PYPAM_LOCK on first use
+	self->_save = NULL;
+
 	return 0;
 
 cleanup_mutex:
@@ -371,6 +375,68 @@ py_tnpam_ctx_set_rhost(tnpam_ctx_t *self, PyObject *value, void *closure)
 	return 0;
 }
 
+PyDoc_STRVAR(py_tnpam_set_conversation__doc__,
+"set_conversation(*, conversation_function) -> None\n"
+"---------------------------------------------------\n\n"
+"Replace the conversation function.\n\n"
+"This method allows updating the conversation callback function after the\n"
+"PAM context has been created. This can be useful when the conversation\n"
+"handling needs to change during the lifecycle of the PAM session.\n\n"
+"Parameters\n"
+"----------\n"
+"conversation_function : callable\n"
+"    New callback function for PAM conversation. Must accept three arguments:\n"
+"    (ctx, messages, private_data) where ctx is the PAM context, messages is\n"
+"    a tuple of struct_pam_message objects, and private_data is the private\n"
+"    data provided when the context was created.\n\n"
+"Raises\n"
+"------\n"
+"ValueError\n"
+"    If conversation_function is not provided\n"
+"TypeError\n"
+"    If conversation_function is not callable\n\n"
+"Note\n"
+"----\n"
+"The old conversation function reference is released when this method is called.\n"
+"The private data remains unchanged.\n"
+);
+static PyObject *
+py_tnpam_set_conversation(tnpam_ctx_t *self, PyObject *args, PyObject *kwds)
+{
+	static char *kwlist[] = {
+		"conversation_function",
+		NULL
+	};
+	PyObject *conv_fn = NULL;
+	PyObject *old_conv_fn = NULL;
+
+	if (!PyArg_ParseTupleAndKeywords(args, kwds, "|$O", kwlist,
+					 &conv_fn)) {
+		return NULL;
+	}
+
+	if (conv_fn == NULL) {
+		PyErr_SetString(PyExc_ValueError, "conversation_function is required");
+		return NULL;
+	}
+
+	if (!PyCallable_Check(conv_fn)) {
+		PyErr_SetString(PyExc_TypeError, "conversation_function must be callable");
+		return NULL;
+	}
+
+	// Save old reference
+	old_conv_fn = self->conv_data.callback_fn;
+
+	// Set new reference
+	self->conv_data.callback_fn = Py_NewRef(conv_fn);
+
+	// Release old reference
+	Py_XDECREF(old_conv_fn);
+
+	Py_RETURN_NONE;
+}
+
 static PyMethodDef py_tnpam_ctx_methods[] = {
 	{
 		.ml_name = "authenticate",
@@ -430,6 +496,12 @@ static PyMethodDef py_tnpam_ctx_methods[] = {
 		.ml_name = "messages",
 		.ml_meth = (PyCFunction)py_tnpam_ctx_messages,
 		.ml_flags = METH_NOARGS,
+	},
+	{
+		.ml_name = "set_conversation",
+		.ml_meth = (PyCFunction)py_tnpam_set_conversation,
+		.ml_flags = METH_VARARGS | METH_KEYWORDS,
+		.ml_doc = py_tnpam_set_conversation__doc__,
 	},
 	{NULL}
 };

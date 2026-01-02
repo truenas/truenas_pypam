@@ -335,6 +335,11 @@ class UserPamAuthenticator:
                 "No PAM context available - authentication may not have completed"
             )
 
+        # Swap to simple conversation callback to avoid thread issues
+        # acct_mgmt() typically doesn't need conversation, but if it does,
+        # we don't want to trigger the complex threaded callback
+        self.ctx.set_conversation(conversation_function=_conv_callback_simple)
+
         try:
             self.ctx.acct_mgmt()
             code = truenas_pypam.PAMCode.PAM_SUCCESS
