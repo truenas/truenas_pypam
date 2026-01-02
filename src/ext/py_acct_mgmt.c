@@ -41,7 +41,9 @@ py_tnpam_acct_mgmt(tnpam_ctx_t *self, PyObject *args, PyObject *kwds)
 	PYPAM_UNLOCK(self);
 
 	if (ret != PAM_SUCCESS) {
-		set_pam_exc(ret, "pam_acct_mgmt() failed");
+		if (!PyErr_Occurred()) {
+			set_pam_exc(ret, "pam_acct_mgmt() failed");
+		}
 		return NULL;
 	}
 

@@ -412,4 +412,5 @@ _set_pam_exc(int code, const char *additional_info, const char *location)
 	Py_CLEAR(obj);
 
 	PyErr_SetObject(state->pam_error, exc);
+	Py_DECREF(exc);
 }

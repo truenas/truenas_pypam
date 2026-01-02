@@ -44,7 +44,9 @@ py_tnpam_open_session(tnpam_ctx_t *self, PyObject *args, PyObject *kwds)
 	PYPAM_UNLOCK(self);
 
 	if (ret != PAM_SUCCESS) {
-		set_pam_exc(ret, "pam_open_session() failed");
+		if (!PyErr_Occurred()) {
+			set_pam_exc(ret, "pam_open_session() failed");
+		}
 		return NULL;
 	}
 
@@ -87,7 +89,9 @@ py_tnpam_close_session(tnpam_ctx_t *self, PyObject *args, PyObject *kwds)
 	PYPAM_UNLOCK(self);
 
 	if (ret != PAM_SUCCESS) {
-		set_pam_exc(ret, "pam_close_session() failed");
+		if (!PyErr_Occurred()) {
+			set_pam_exc(ret, "pam_close_session() failed");
+		}
 		return NULL;
 	}
 
