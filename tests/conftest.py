@@ -3,6 +3,7 @@ Pytest configuration and fixtures for truenas_pypam tests.
 
 This module sets up test users needed for testing.
 """
+import base64
 import os
 import pwd
 import subprocess
@@ -11,6 +12,9 @@ import pytest
 
 TEST_USER = "bob"
 TEST_PASSWORD = "Cats"
+
+OATH_SECRET = 'JBSWY3DPEHPK3PXP'   # base32; deterministic across runs
+OATH_SERVICE = 'truenas-test-mfa'    # PAM service name
 
 
 def user_exists(username):
@@ -56,6 +60,23 @@ def create_test_user():
         return False
 
 
+def setup_oath():
+    """Write /etc/users.oath and /etc/pam.d/truenas-test-mfa."""
+    # pam_oath expects the secret in hex; OATH_SECRET is base32
+    secret_hex = base64.b32decode(OATH_SECRET).hex()
+    with open('/etc/users.oath', 'w') as f:
+        f.write(f'HOTP/T30/6 {TEST_USER} - {secret_hex}\n')
+    os.chmod('/etc/users.oath', 0o600)
+
+    pam_conf = (
+        'auth  requisite  pam_unix.so nodelay\n'
+        'auth  required   pam_oath.so usersfile=/etc/users.oath window=10 digits=6\n'
+        'account  required  pam_unix.so\n'
+    )
+    with open(f'/etc/pam.d/{OATH_SERVICE}', 'w') as f:
+        f.write(pam_conf)
+
+
 def pytest_sessionstart(session):
     """
     Called at the start of the test session to ensure test user exists.
@@ -72,6 +93,9 @@ def pytest_sessionstart(session):
                 f"echo '{TEST_USER}:{TEST_PASSWORD}' | sudo chpasswd",
                 1
             )
+
+    if os.geteuid() == 0:
+        setup_oath()
 
 
 @pytest.fixture

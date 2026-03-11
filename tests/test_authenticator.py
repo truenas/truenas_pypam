@@ -169,15 +169,12 @@ def test_end_cleanup():
     resp = auth.auth_init()
 
     # Start authentication
-    assert auth._thread_state is not None
-    assert auth._auth_thread is not None
+    assert auth.ctx is not None
 
     # Clean up
     auth.end()
 
     assert auth.ctx is None
-    assert auth._thread_state is None
-    assert auth._auth_thread is None
     assert auth.state.stage == AuthenticatorStage.START
 
 
