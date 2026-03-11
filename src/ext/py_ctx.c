@@ -49,34 +49,37 @@ py_tnpam_ctx_init(tnpam_ctx_t *self, PyObject *args, PyObject *kwds)
 		return -1;
 	}
 
-	if (cfg.conv_fn == NULL) {
-		PyErr_SetString(PyExc_ValueError, "conversation_function is required");
-		return -1;
-	}
+	if (cfg.conv_fn != NULL) {
+		if (!PyCallable_Check(cfg.conv_fn)) {
+			PyErr_SetString(PyExc_TypeError, "conversation_function must be callable");
+			return -1;
+		}
 
-	if (!PyCallable_Check(cfg.conv_fn)) {
-		PyErr_SetString(PyExc_TypeError, "conversation_function must be callable");
-		return -1;
-	}
+		// truenas_pam_conv is the hard-coded C callback function that wraps around
+		// the provided python callback function in self->conv_data.callback_fn.
+		self->conv.conv = truenas_pam_conv;
 
-	// truenas_pam_conv is the hard-coded C callback function that wraps around the
-	// provided python callback function in self->conv_data.callback_fn.
-	self->conv.conv = truenas_pam_conv;
+		// appdata_ptr is a borrowed reference to the current object.
+		self->conv.appdata_ptr = (void *)self;
+		self->conv_data.py_cb.callback_fn = Py_NewRef(cfg.conv_fn);
+		self->conv_data.py_cb.private_data = cfg.private_data ?
+						        Py_NewRef(cfg.private_data) :
+						        Py_NewRef(Py_None);
 
-	// the appdata_ptr provided to pam_start() is actually a borrowed reference to
-	// the current object. This provides access to handle python state, mutex, etc
-	// within truenas_pam_conv and also allows the *user-provided* private_data to
-	// the user-provided callback function
-	self->conv.appdata_ptr = (void *)self;  // Use borrowed reference
-	self->conv_data.callback_fn = Py_NewRef(cfg.conv_fn);
-	self->conv_data.private_data = cfg.private_data ?
-				       Py_NewRef(cfg.private_data) :
-				       Py_NewRef(Py_None);
-
-	// history of messages received from PAM service modules.
-	self->conv_data.messages = PyList_New(0);
-	if (self->conv_data.messages == NULL) {
-		goto cleanup;
+		// history of messages received from PAM service modules.
+		self->conv_data.py_cb.messages = PyList_New(0);
+		if (self->conv_data.py_cb.messages == NULL) {
+			goto cleanup;
+		}
+	} else {
+		// Internal thread mode: use tnpam_internal_conv instead of a Python callback.
+		self->conv_type = TNPAM_CONV_INTERNAL_THREAD;
+		self->conv.conv = tnpam_internal_conv;
+		self->conv.appdata_ptr = (void *)self;
+		self->conv_data.th_cb.messages = PyList_New(0);
+		if (self->conv_data.th_cb.messages == NULL) {
+			goto cleanup;
+		}
 	}
 
 	Py_BEGIN_ALLOW_THREADS
@@ -94,6 +97,11 @@ py_tnpam_ctx_init(tnpam_ctx_t *self, PyObject *args, PyObject *kwds)
 		msg = "pam_fail_delay() failed";
 	} else {
 		err = pthread_mutex_init(&self->pam_hdl_lock, NULL);
+		if (!err && self->conv_type == TNPAM_CONV_INTERNAL_THREAD) {
+			err = pthread_mutex_init(&self->conv_data.th_cb.conv_mutex, NULL);
+			if (!err) err = pthread_cond_init(&self->conv_data.th_cb.conv_cond_main, NULL);
+			if (!err) err = pthread_cond_init(&self->conv_data.th_cb.conv_cond_auth, NULL);
+		}
 	}
 	Py_END_ALLOW_THREADS
 
@@ -104,8 +112,8 @@ py_tnpam_ctx_init(tnpam_ctx_t *self, PyObject *args, PyObject *kwds)
 
 	if (err) {
 		PyErr_Format(PyExc_RuntimeError,
-			     "pthread_muex_init() failed for pam_hdl_lock: %s",
-			     strerror(errno));
+			     "pthread mutex/cond init failed: %s",
+			     strerror(err));
 		goto cleanup;
 	}
 
@@ -130,25 +138,47 @@ cleanup:
 		pam_end(self->hdl, PAM_ABORT);
 		self->hdl = NULL;
 	}
-	Py_CLEAR(self->conv_data.callback_fn);
-	Py_CLEAR(self->conv_data.private_data);
-	Py_CLEAR(self->conv_data.messages);
+	if (self->conv_type == TNPAM_CONV_CALLBACK) {
+		Py_CLEAR(self->conv_data.py_cb.callback_fn);
+		Py_CLEAR(self->conv_data.py_cb.private_data);
+		Py_CLEAR(self->conv_data.py_cb.messages);
+	} else {
+		Py_CLEAR(self->conv_data.th_cb.messages);
+	}
 	return -1;
 }
 
 static void
 py_tnpam_ctx_dealloc(tnpam_ctx_t *self)
 {
+	if (self->conv_type == TNPAM_CONV_INTERNAL_THREAD) {
+		if (self->conv_data.th_cb.thread_started && !self->conv_data.th_cb.thread_joined) {
+			/* Signal and join a pending auth thread */
+			pthread_mutex_lock(&self->conv_data.th_cb.conv_mutex);
+			self->conv_data.th_cb.conv_state = THREAD_STATE_CONV_CANCELLED;
+			pthread_cond_signal(&self->conv_data.th_cb.conv_cond_auth);
+			pthread_mutex_unlock(&self->conv_data.th_cb.conv_mutex);
+			pthread_join(self->conv_data.th_cb.auth_thread, NULL);
+		}
+		pthread_cond_destroy(&self->conv_data.th_cb.conv_cond_auth);
+		pthread_cond_destroy(&self->conv_data.th_cb.conv_cond_main);
+		pthread_mutex_destroy(&self->conv_data.th_cb.conv_mutex);
+	}
+
 	if (self->hdl != NULL) {
 		pam_end(self->hdl, self->last_pam_result);
 		self->hdl = NULL;
 	}
 	pthread_mutex_destroy(&self->pam_hdl_lock);
 	Py_CLEAR(self->user);
-	Py_CLEAR(self->conv_data.callback_fn);
-	Py_CLEAR(self->conv_data.private_data);
-	Py_CLEAR(self->conv_data.messages);
-	// conv.appdata_ptr is a borrowed reference, no need to clear
+	if (self->conv_type == TNPAM_CONV_CALLBACK) {
+		Py_CLEAR(self->conv_data.py_cb.callback_fn);
+		Py_CLEAR(self->conv_data.py_cb.private_data);
+		Py_CLEAR(self->conv_data.py_cb.messages);
+	} else {
+		Py_CLEAR(self->conv_data.th_cb.messages);
+	}
+	/* conv.appdata_ptr is a borrowed reference, no need to clear */
 
 	Py_TYPE(self)->tp_free((PyObject *)self);
 }
@@ -156,7 +186,10 @@ py_tnpam_ctx_dealloc(tnpam_ctx_t *self)
 static
 PyObject *py_tnpam_ctx_messages(tnpam_ctx_t *self, PyObject *Py_UNUSED(ignored))
 {
-	return PyList_AsTuple(self->conv_data.messages);
+	if (self->conv_type == TNPAM_CONV_CALLBACK) {
+		return PyList_AsTuple(self->conv_data.py_cb.messages);
+	}
+	return PyList_AsTuple(self->conv_data.th_cb.messages);
 }
 
 /* Getters and setters for PAM items */
@@ -415,6 +448,13 @@ py_tnpam_set_conversation(tnpam_ctx_t *self, PyObject *args, PyObject *kwds)
 		return NULL;
 	}
 
+	if (self->conv_type != TNPAM_CONV_CALLBACK) {
+		PyErr_SetString(PyExc_RuntimeError,
+				"set_conversation() is only available on contexts "
+				"created with a conversation_function");
+		return NULL;
+	}
+
 	if (conv_fn == NULL) {
 		PyErr_SetString(PyExc_ValueError, "conversation_function is required");
 		return NULL;
@@ -426,10 +466,10 @@ py_tnpam_set_conversation(tnpam_ctx_t *self, PyObject *args, PyObject *kwds)
 	}
 
 	// Save old reference
-	old_conv_fn = self->conv_data.callback_fn;
+	old_conv_fn = self->conv_data.py_cb.callback_fn;
 
 	// Set new reference
-	self->conv_data.callback_fn = Py_NewRef(conv_fn);
+	self->conv_data.py_cb.callback_fn = Py_NewRef(conv_fn);
 
 	// Release old reference
 	Py_XDECREF(old_conv_fn);
@@ -437,12 +477,87 @@ py_tnpam_set_conversation(tnpam_ctx_t *self, PyObject *args, PyObject *kwds)
 	Py_RETURN_NONE;
 }
 
+PyDoc_STRVAR(py_tnpam_begin_authentication__doc__,
+"begin_authentication(*, silent=False, disallow_null_authtok=False, timeout=None)\n"
+"---------------------------------------------------------------------------------\n\n"
+"Start PAM authentication on an internal C thread.\n\n"
+"Only valid for contexts created without a conversation_function. Launches\n"
+"pam_authenticate(3) on a background pthread and returns when PAM either\n"
+"needs user input or completes.\n\n"
+"Parameters\n"
+"----------\n"
+"silent : bool, optional\n"
+"    Do not emit any messages during authentication (default=False).\n"
+"disallow_null_authtok : bool, optional\n"
+"    Return PAM_AUTH_ERR if the user has no authentication token (default=False).\n"
+"timeout : float or None, optional\n"
+"    Maximum seconds to wait for the first conversation or completion.\n"
+"    None means wait indefinitely (default=None).\n\n"
+"Returns\n"
+"-------\n"
+"tuple of struct_pam_message\n"
+"    When PAM needs user input (echo-off prompt, echo-on prompt, etc.).\n"
+"None\n"
+"    When authentication succeeds without requiring further input.\n\n"
+"Raises\n"
+"------\n"
+"PAMError\n"
+"    Authentication failed.\n"
+"TimeoutError\n"
+"    The timeout was exceeded.\n"
+"RuntimeError\n"
+"    Called on a context that has a conversation_function, or authentication\n"
+"    is already in progress.\n"
+);
+
+PyDoc_STRVAR(py_tnpam_continue_authentication__doc__,
+"continue_authentication(responses, *, timeout=None)\n"
+"-----------------------------------------------------\n\n"
+"Send responses to a pending PAM conversation and wait for the next step.\n\n"
+"Must be called after begin_authentication() or a previous call to this\n"
+"method returned a messages tuple.\n\n"
+"Parameters\n"
+"----------\n"
+"responses : iterable of str or None\n"
+"    One response per pending message, in order. Use None for messages\n"
+"    that do not require a reply (PAM_TEXT_INFO, PAM_ERROR_MSG).\n"
+"timeout : float or None, optional\n"
+"    Maximum seconds to wait for the next conversation or completion.\n"
+"    None means wait indefinitely (default=None).\n\n"
+"Returns\n"
+"-------\n"
+"tuple of struct_pam_message\n"
+"    When PAM needs further input.\n"
+"None\n"
+"    When authentication completes successfully.\n\n"
+"Raises\n"
+"------\n"
+"PAMError\n"
+"    Authentication failed.\n"
+"TimeoutError\n"
+"    The timeout was exceeded.\n"
+"RuntimeError\n"
+"    No conversation is currently pending.\n"
+);
+
 static PyMethodDef py_tnpam_ctx_methods[] = {
 	{
 		.ml_name = "authenticate",
 		.ml_meth = (PyCFunction)py_tnpam_authenticate,
 		.ml_flags = METH_VARARGS | METH_KEYWORDS,
 		.ml_doc = py_tnpam_authenticate__doc__,
+	},
+	{
+		.ml_name = "begin_authentication",
+		.ml_meth = (PyCFunction)py_tnpam_begin_authentication,
+		.ml_flags = METH_VARARGS | METH_KEYWORDS,
+		.ml_doc = py_tnpam_begin_authentication__doc__,
+	},
+	{
+		.ml_name = "continue_authentication",
+		.ml_meth = (PyCFunction)py_tnpam_continue_authentication,
+		.ml_flags = METH_VARARGS | METH_KEYWORDS,
+		.ml_doc = py_tnpam_continue_authentication__doc__,
 	},
 	{
 		.ml_name = "acct_mgmt",

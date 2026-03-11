@@ -19,6 +19,13 @@ py_tnpam_authenticate(tnpam_ctx_t *self, PyObject *args, PyObject *kwds)
 	int flags = 0;
 	pamcode_t ret;
 
+	if (self->conv_type == TNPAM_CONV_INTERNAL_THREAD) {
+		PyErr_SetString(PyExc_RuntimeError,
+				"use begin_authentication() for contexts "
+				"without a conversation_function");
+		return NULL;
+	}
+
 	if (!PyArg_ParseTupleAndKeywords(args, kwds, "|$pp", kwlist,
 					 &silent,
 					 &disallow_null_authtok)) {
