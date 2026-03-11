@@ -92,12 +92,12 @@ def test_get_context_missing_user():
         )
 
 
-def test_get_context_missing_conversation_function():
-    """Test get_context fails without conversation_function argument."""
-    with pytest.raises(ValueError, match="conversation_function is required"):
-        truenas_pypam.get_context(
-            user=TEST_USER
-        )
+def test_get_context_without_conversation_function():
+    """Test get_context without conversation_function creates a threaded context."""
+    ctx = truenas_pypam.get_context(user=TEST_USER)
+    assert ctx is not None
+    assert hasattr(ctx, 'begin_authentication')
+    assert hasattr(ctx, 'continue_authentication')
 
 
 def test_get_context_invalid_conversation_function():

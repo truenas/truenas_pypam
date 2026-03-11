@@ -135,7 +135,6 @@ PyObject *py_pam_msg(tnpam_state_t *state, const struct pam_message *msg)
 	return entry;
 }
 
-static
 PyObject *py_pam_messages_parse(int num_msg, const struct pam_message **msg)
 {
 	PyObject *out = NULL;
@@ -193,7 +192,6 @@ void free_pam_resp(int num_msg, struct pam_response *reply_array)
  * and converts it into an array of struct pam_response responses from the application
  * to the PAM stack.
  */
-static
 bool parse_py_pam_resp(int num_msg, struct pam_response **resp, PyObject *pyresp)
 {
 	struct pam_response *reply = NULL;
@@ -299,7 +297,8 @@ int truenas_pam_conv(int num_msg, const struct pam_message **msg,
 
 	PYPAM_ASSERT((ctx != NULL), "Unexpected NULL appdata_ptr");
 	PYPAM_ASSERT((num_msg >= 0), "Unexpected negative value for num_msg");
-	PYPAM_ASSERT((ctx->conv_data.callback_fn != NULL), "Undefined callback function");
+	PYPAM_ASSERT((ctx->conv_type == TNPAM_CONV_CALLBACK), "truenas_pam_conv called on non-callback context");
+	PYPAM_ASSERT((ctx->conv_data.py_cb.callback_fn != NULL), "Undefined callback function");
 
 	// We need to reacquire GIL and unlock the pam context
 	PYPAM_UNLOCK(ctx);
@@ -316,14 +315,14 @@ int truenas_pam_conv(int num_msg, const struct pam_message **msg,
 		goto cleanup;
 	}
 
-	if (PyList_Append(ctx->conv_data.messages, pymsg) < 0) {
+	if (PyList_Append(ctx->conv_data.py_cb.messages, pymsg) < 0) {
 		goto cleanup;
 	}
 
-	pyresp = PyObject_CallFunctionObjArgs(ctx->conv_data.callback_fn,
+	pyresp = PyObject_CallFunctionObjArgs(ctx->conv_data.py_cb.callback_fn,
 					      ctx,
 					      pymsg,
-					      ctx->conv_data.private_data,
+					      ctx->conv_data.py_cb.private_data,
 					      NULL);
 	if (pyresp == NULL) {
 		goto cleanup;
@@ -343,6 +342,64 @@ cleanup:
 	// back into the wonderful world of pure C
 	PYPAM_LOCK(ctx);
 	return retval;
+}
+
+/*
+ * Simple discard conversation function for use during pam_acct_mgmt() in
+ * internal thread mode. Account management only emits informational messages
+ * (PAM_TEXT_INFO / PAM_ERROR_MSG), not interactive prompts. We allocate
+ * zero-filled responses (NULL resp strings are acceptable for info messages).
+ */
+int
+tnpam_discard_conv(int num_msg, const struct pam_message **msg,
+		   struct pam_response **resp, void *appdata_ptr)
+{
+	*resp = calloc(num_msg, sizeof(struct pam_response));
+	return (*resp != NULL) ? PAM_SUCCESS : PAM_BUF_ERR;
+}
+
+/*
+ * Internal conversation function used in internal pthread mode. Called by
+ * pam_authenticate() on the auth thread. Signals the main thread with the
+ * pending messages and waits for responses — all via pure C pthreads with
+ * no GIL involvement.
+ */
+int
+tnpam_internal_conv(int num_msg, const struct pam_message **msg,
+		    struct pam_response **resp, void *appdata_ptr)
+{
+	tnpam_ctx_t *ctx = appdata_ptr;
+
+	PYPAM_ASSERT((ctx != NULL), "Unexpected NULL appdata_ptr");
+	PYPAM_ASSERT((ctx->conv_type == TNPAM_CONV_INTERNAL_THREAD), "tnpam_internal_conv called on non-thread context");
+
+	pthread_mutex_lock(&ctx->conv_data.th_cb.conv_mutex);
+
+	/* Dealloc may have set CANCELLED before we entered — honour it immediately. */
+	if (ctx->conv_data.th_cb.conv_state == THREAD_STATE_CONV_CANCELLED) {
+		pthread_mutex_unlock(&ctx->conv_data.th_cb.conv_mutex);
+		return PAM_CONV_ERR;
+	}
+
+	ctx->conv_data.th_cb.pending_msgs = msg;
+	ctx->conv_data.th_cb.num_pending_msgs = num_msg;
+	ctx->conv_data.th_cb.conv_state = THREAD_STATE_CONV_PENDING;
+	pthread_cond_signal(&ctx->conv_data.th_cb.conv_cond_main);  /* wake main thread */
+
+	while (ctx->conv_data.th_cb.conv_state == THREAD_STATE_CONV_PENDING) {
+		pthread_cond_wait(&ctx->conv_data.th_cb.conv_cond_auth, &ctx->conv_data.th_cb.conv_mutex);
+	}
+
+	if (ctx->conv_data.th_cb.conv_state == THREAD_STATE_CONV_CANCELLED) {
+		pthread_mutex_unlock(&ctx->conv_data.th_cb.conv_mutex);
+		return PAM_CONV_ERR;
+	}
+
+	/* CONV_RESPONDED: pick up responses (ownership transferred to PAM) */
+	*resp = ctx->conv_data.th_cb.pending_resps;
+	ctx->conv_data.th_cb.pending_resps = NULL;
+	pthread_mutex_unlock(&ctx->conv_data.th_cb.conv_mutex);
+	return PAM_SUCCESS;
 }
 
 /*

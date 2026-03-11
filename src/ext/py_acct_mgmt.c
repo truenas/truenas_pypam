@@ -35,10 +35,29 @@ py_tnpam_acct_mgmt(tnpam_ctx_t *self, PyObject *args, PyObject *kwds)
 		return NULL;
 	}
 
-	PYPAM_LOCK(self);
-	ret = pam_acct_mgmt(self->hdl, flags);
-	self->last_pam_result = ret;
-	PYPAM_UNLOCK(self);
+	if (self->conv_type == TNPAM_CONV_INTERNAL_THREAD) {
+		/*
+		 * In internal thread mode the PAM conv is tnpam_internal_conv,
+		 * which blocks waiting for the main thread. acct_mgmt() is
+		 * synchronous and only emits informational messages, so we
+		 * temporarily swap in tnpam_discard_conv for this call.
+		 */
+		struct pam_conv discard_conv = {
+			.conv = tnpam_discard_conv,
+			.appdata_ptr = NULL,
+		};
+		PYPAM_LOCK(self);
+		pam_set_item(self->hdl, PAM_CONV, &discard_conv);
+		ret = pam_acct_mgmt(self->hdl, flags);
+		self->last_pam_result = ret;
+		pam_set_item(self->hdl, PAM_CONV, &self->conv);
+		PYPAM_UNLOCK(self);
+	} else {
+		PYPAM_LOCK(self);
+		ret = pam_acct_mgmt(self->hdl, flags);
+		self->last_pam_result = ret;
+		PYPAM_UNLOCK(self);
+	}
 
 	if (ret != PAM_SUCCESS) {
 		if (!PyErr_Occurred()) {

@@ -11,7 +11,7 @@ This package provides:
 ## Features
 
 - Thread-safe PAM authentication with pthread locks
-- Asynchronous conversation handling via threading and queues
+- Native C-threaded PAM conversation — no Python threading overhead
 - Session management (open/close)
 - Account management and validation
 - Support for various PAM services (login, sshd, sudo, etc.)
@@ -28,8 +28,7 @@ This package provides:
 apt-get install libpam0g-dev libbsd-dev python3-dev
 
 # Build and install
-python3 setup.py build
-python3 setup.py install
+pip install -e .
 ```
 
 ### Debian Package
@@ -46,7 +45,10 @@ dpkg -i ../python3-truenas-pypam_*.deb
 
 ### High-Level API (Recommended)
 
-The high-level API provides a clean, Pythonic interface for authentication:
+`UserPamAuthenticator` drives PAM via the C extension's native threaded mode.
+Each `auth_init()` / `auth_continue()` call suspends the internal PAM thread
+at a conversation boundary and returns the pending messages to the caller.
+No Python threads or queues are involved.
 
 ```python
 from truenas_authenticator import UserPamAuthenticator
@@ -55,12 +57,12 @@ import truenas_pypam
 # Create authenticator
 auth = UserPamAuthenticator(username='bob', service='login')
 
-# Initialize authentication
+# Initialize authentication — starts the C auth thread internally
 resp = auth.auth_init()
 
 # Handle conversation (e.g., password prompt)
 if resp.code == truenas_pypam.PAMCode.PAM_CONV_AGAIN:
-    # Provide responses to PAM prompts
+    # resp.reason is a tuple of PAM message objects
     responses = []
     for msg in resp.reason:
         if msg.msg_style == truenas_pypam.MSGStyle.PAM_PROMPT_ECHO_OFF:
@@ -76,7 +78,7 @@ if resp.code == truenas_pypam.PAMCode.PAM_SUCCESS:
     print("Authentication successful!")
 
     # Open session
-    auth.login('session123')
+    auth.login()
 
     # ... do work ...
 
@@ -86,7 +88,7 @@ if resp.code == truenas_pypam.PAMCode.PAM_SUCCESS:
 
 ### Simple Authentication
 
-For basic username/password authentication:
+For basic username/password authentication without conversation handling:
 
 ```python
 from truenas_authenticator import SimpleAuthenticator
@@ -105,7 +107,7 @@ else:
 
 ### Low-Level API
 
-For direct PAM access:
+For direct PAM access with an explicit conversation callback:
 
 ```python
 import truenas_pypam
@@ -120,14 +122,14 @@ def conversation_callback(ctx, messages, private_data):
             responses.append(None)
     return responses
 
-# Create PAM context
+# Create PAM context with a conversation function
 ctx = truenas_pypam.get_context(
     service_name='login',
     user='bob',
     conversation_function=conversation_callback
 )
 
-# Authenticate
+# Authenticate (conversation_callback is called synchronously)
 ctx.authenticate()
 
 # Check account
@@ -140,38 +142,50 @@ ctx.open_session()
 ctx.close_session()
 ```
 
+When `get_context()` is called **without** a `conversation_function`, the
+context operates in native threaded mode and must use `begin_authentication()`
+/ `continue_authentication()` instead of `authenticate()`.  `UserPamAuthenticator`
+handles this automatically.
+
 ## API Reference
 
 ### High-Level Classes
 
 #### UserPamAuthenticator
-Main authenticator class for PAM authentication with conversation support.
+Main authenticator class for multi-step PAM authentication with conversation
+support.  Uses the C extension's native threaded mode internally — dropping
+Python-level threading machinery entirely.
 
 **Parameters:**
 - `username` (str): Username to authenticate
-- `service` (str): PAM service name (default: 'login')
-- `authentication_timeout` (int): Timeout in seconds (default: 10)
+- `service` (str): PAM service name (default: `'login'`)
+- `authentication_timeout` (int): Per-step timeout in seconds (default: 10)
 - `rhost` (str, optional): Remote host
 - `ruser` (str, optional): Remote user
 - `fail_delay` (int, optional): Fail delay in microseconds
+- `pam_env` (dict, optional): Extra PAM environment variables to set
 
 **Methods:**
-- `auth_init()`: Start authentication, returns conversation messages
-- `auth_continue(responses)`: Continue with responses to conversation
-- `login(session_id)`: Open PAM session
-- `logout()`: Close PAM session and cleanup
-- `end()`: Force cleanup of resources
+- `auth_init()`: Start authentication; returns `PAM_CONV_AGAIN` with messages or `PAM_SUCCESS`
+- `auth_continue(responses)`: Supply responses to a pending conversation round
+- `account_management()`: Run `pam_acct_mgmt()` after successful authentication
+- `login()`: Open a PAM session
+- `logout()`: Close the PAM session and clean up
+- `end()`: Abort any in-progress authentication and reset state (C auth thread
+  is cancelled via dealloc of the context object)
 
 #### SimpleAuthenticator
-Simplified authenticator for basic username/password authentication.
+Simplified authenticator for single-step username/password authentication.
+Wraps the synchronous `authenticate()` path with a built-in conversation
+callback — no threading involved.
 
 **Parameters:**
 - `username` (str): Username to authenticate
 - `password` (str): User password
-- `service` (str): PAM service name (default: 'login')
+- `service` (str): PAM service name (default: `'login'`)
 
 **Methods:**
-- `authenticate_simple()`: Perform authentication, returns True/False
+- `authenticate_simple()`: Perform authentication, returns `True`/`False`
 
 ### Low-Level Functions
 
@@ -181,7 +195,9 @@ Create a PAM context for authentication.
 **Parameters:**
 - `service_name` (str): PAM service configuration to use
 - `user` (str): Username to authenticate
-- `conversation_function` (callable): Callback for PAM conversation
+- `conversation_function` (callable, optional): Callback for PAM conversation;
+  omit to create a native threaded context for use with
+  `begin_authentication()` / `continue_authentication()`
 - `conversation_private_data` (any): Data passed to conversation callback
 - `confdir` (str, optional): PAM configuration directory
 - `rhost` (str, optional): Remote host
@@ -191,7 +207,7 @@ Create a PAM context for authentication.
 ### Enums and Constants
 
 #### PAMCode
-PAM return codes (e.g., PAM_SUCCESS, PAM_AUTH_ERR, PAM_CONV_AGAIN)
+PAM return codes (e.g., `PAM_SUCCESS`, `PAM_AUTH_ERR`, `PAM_CONV_AGAIN`)
 
 #### MSGStyle
 PAM message styles:
@@ -211,17 +227,12 @@ Authentication workflow stages:
 
 ## Testing
 
-Run the test suite:
-
 ```bash
 # Run all tests
 pytest tests/
 
-# Run specific test file
-pytest tests/test_authenticator.py
-
-# Run with verbose output
-pytest -v tests/
+# Run authenticator tests only
+pytest tests/test_authenticator.py -v
 ```
 
 ## Development
@@ -229,8 +240,8 @@ pytest -v tests/
 ### Building the Extension
 
 ```bash
-# Build in-place for development
-python3 setup.py build_ext --inplace
+# Build and install in editable mode
+pip install -e .
 
 # Run tests
 pytest tests/
@@ -239,21 +250,28 @@ pytest tests/
 ### Project Structure
 
 ```
-truenas_pypam_client/
-├── src/
-│   ├── ext/                  # C extension source files
-│   │   ├── truenas_pypam.c   # Main module
-│   │   ├── py_auth.c         # Authentication functions
-│   │   ├── py_ctx.c          # Context management
-│   │   ├── py_conv.c         # Conversation handling
-│   │   └── ...
-│   └── truenas_authenticator/ # High-level Python API
-│       ├── __init__.py
-│       └── authenticator.py
-├── tests/                    # Test suite
-├── examples/                 # Example scripts
-├── debian/                   # Debian packaging
-└── setup.py                 # Build configuration
+truenas_pypam/
+|-- src/
+|   |-- ext/                    C extension source files
+|   |   |-- truenas_pypam.c     Main module entry point
+|   |   |-- py_auth.c           authenticate() for callback-based contexts
+|   |   |-- py_auth_thread.c    begin/continue_authentication() + pthread machinery
+|   |   |-- py_acct_mgmt.c      pam_acct_mgmt() binding
+|   |   |-- py_ctx.c            Context creation and lifecycle
+|   |   |-- py_conv.c           Conversation callback plumbing
+|   |   |-- py_chauthtok.c      Password change binding
+|   |   |-- py_cred.c           Credential management binding
+|   |   |-- py_env.c            PAM environment binding
+|   |   |-- py_error.c          PAMError exception type
+|   |   |-- py_session.c        Session open/close binding
+|   |   `-- truenas_pypam.h     Shared internal header
+|   `-- truenas_authenticator/  High-level Python API
+|       |-- __init__.py
+|       `-- authenticator.py
+|-- tests/                      Test suite
+|-- examples/                   Example scripts
+|-- debian/                     Debian packaging
+`-- setup.py                    Build configuration
 ```
 
 ## Security Considerations
@@ -263,10 +281,13 @@ truenas_pypam_client/
 - Credentials should never be logged or stored in plain text
 - The module uses pthread locks for thread safety
 - PAM sessions should always be properly closed to avoid resource leaks
+- Deallocating a PAM context while authentication is in progress cancels
+  the C auth thread cleanly before freeing resources
 
 ### Python Auditing
 
-The extension module implements Python auditing hooks for security-sensitive operations. The following events are audited:
+The extension module implements Python auditing hooks for security-sensitive
+operations.  The following events are audited:
 
 - `truenas_pypam.authenticate` - Authentication attempts
 - `truenas_pypam.acct_mgmt` - Account management checks
@@ -287,20 +308,6 @@ def audit_hook(event, args):
 sys.addaudithook(audit_hook)
 ```
 
-This provides visibility into authentication operations for security monitoring and compliance purposes.
-
 ## License
 
 LGPL-3.0-or-later - See LICENSE file for details.
-
-## Contributing
-
-Contributions are welcome! Please ensure:
-- All tests pass
-- Code follows the existing style
-- New features include tests
-- Documentation is updated
-
-## Support
-
-For issues and questions, please file an issue on the project repository.
