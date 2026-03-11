@@ -5,6 +5,9 @@
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
 #include <stdbool.h>
+#include <pthread.h>
+#include <time.h>
+#include <errno.h>
 #include <security/pam_appl.h>
 #include <security/pam_misc.h>
 
@@ -15,6 +18,16 @@
  */
 typedef int pamcode_t;
 typedef int boolean_t;
+
+/* Thread conversation state for internal pthread mode */
+enum {
+	THREAD_STATE_IDLE = 0,
+	THREAD_STATE_AUTH_RUNNING,
+	THREAD_STATE_CONV_PENDING,
+	THREAD_STATE_CONV_RESPONDED,
+	THREAD_STATE_AUTH_DONE,
+	THREAD_STATE_CONV_CANCELLED,
+};
 
 #define B_TRUE 1
 #define B_FALSE 0
@@ -64,21 +77,53 @@ typedef struct {
 } tnpam_state_t;
 
 /**
- * @brief Library appdata type to pass as part of struct pam_conv
+ * @brief Selects which conversation mode a PAM context uses.
+ */
+typedef enum {
+	TNPAM_CONV_CALLBACK = 0,       /* Python callable provided by library user */
+	TNPAM_CONV_INTERNAL_THREAD,    /* Internal C pthread; no Python callback */
+} tnpam_conv_type_t;
+
+/**
+ * @brief Conversation state for callback mode.
  *
- * This structure holds state information for the pam_conv callback from
- * PAM modules. It provides a pointer to a python callable provided by
- * library user and private data also provided by the library user.
- * Messages received from the server (which are not sensitive) are stored
- * as a list here.
+ * Holds the Python callable and associated data. Only valid when
+ * conv_type == TNPAM_CONV_CALLBACK.
  *
- * @note This is not a python structure
+ * @note This is not a Python structure.
  */
 typedef struct {
 	PyObject *callback_fn;
 	PyObject *private_data;
 	PyObject *messages;
 } tnpam_conv_t;
+
+/**
+ * @brief Conversation state for internal pthread mode.
+ *
+ * Used when a PAM context is created without a conversation_function. All
+ * synchronization is pure pthreads; the GIL is never held by the auth thread
+ * or tnpam_internal_conv. Only valid when conv_type == TNPAM_CONV_INTERNAL_THREAD.
+ */
+typedef struct {
+	pthread_t auth_thread;
+	boolean_t thread_started;
+	boolean_t thread_joined;
+
+	/* Condition variables for conversation sync */
+	pthread_mutex_t conv_mutex;
+	pthread_cond_t conv_cond_main;  /* main thread waits here */
+	pthread_cond_t conv_cond_auth;  /* auth thread waits here */
+
+	/* Conversation exchange — protected by conv_mutex */
+	int conv_state;                 /* THREAD_STATE_* enum */
+	const struct pam_message **pending_msgs;
+	int num_pending_msgs;
+	struct pam_response *pending_resps; /* set by main thread, freed by PAM */
+	int auth_flags;
+	pamcode_t auth_result;
+	PyObject *messages;
+} tnpam_thread_conv_t;
 
 /**
  * @brief Primary python type that wraps around a PAM application (client) handle
@@ -103,12 +148,17 @@ typedef struct {
 	// we need to reacquire the GIL
 	PyThreadState *_save;
 	pam_handle_t *hdl;
-	tnpam_conv_t conv_data;
 	struct pam_conv conv;
 	PyObject *user;
 	boolean_t authenticated;
 	boolean_t session_opened;
 	pamcode_t last_pam_result;
+
+	tnpam_conv_type_t conv_type;
+	union {
+		tnpam_conv_t py_cb;
+		tnpam_thread_conv_t th_cb;
+	} conv_data;
 } tnpam_ctx_t;
 
 /**
@@ -164,6 +214,8 @@ PyDoc_STRVAR(py_tnpam_authenticate__doc__,
 "    * PAM_USER_UNKNOWN - User unknown to authentication service\n"
 );
 extern PyObject *py_tnpam_authenticate(tnpam_ctx_t *self, PyObject *args, PyObject *kwds);
+extern PyObject *py_tnpam_begin_authentication(tnpam_ctx_t *self, PyObject *args, PyObject *kwds);
+extern PyObject *py_tnpam_continue_authentication(tnpam_ctx_t *self, PyObject *args, PyObject *kwds);
 
 /* provided by py_env.c */
 PyDoc_STRVAR(py_tnpam_getenv__doc__,
@@ -381,6 +433,12 @@ extern PyObject *py_tnpam_close_session(tnpam_ctx_t *self, PyObject *args, PyObj
 /* provided by py_conv.c */
 extern int truenas_pam_conv(int num_msg, const struct pam_message **msg,
 			    struct pam_response **resp, void *appdata_ptr);
+extern int tnpam_discard_conv(int num_msg, const struct pam_message **msg,
+			      struct pam_response **resp, void *appdata_ptr);
+extern int tnpam_internal_conv(int num_msg, const struct pam_message **msg,
+			       struct pam_response **resp, void *appdata_ptr);
+extern bool parse_py_pam_resp(int num_msg, struct pam_response **resp, PyObject *pyresp);
+extern PyObject *py_pam_messages_parse(int num_msg, const struct pam_message **msg);
 extern bool init_pam_conv_struct(PyObject *module_ref);
 
 /* provided by py_error.c */

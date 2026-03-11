@@ -5,13 +5,10 @@
 # work on pam_truenas.
 
 import enum
-import queue
-import threading
-import time
 import truenas_pypam
 from dataclasses import dataclass
 from datetime import datetime, UTC
-from typing import Optional, List, Any, Callable
+from typing import Optional, List, Any
 
 
 class AuthenticatorStage(enum.StrEnum):
@@ -47,104 +44,6 @@ class AuthenticatorResponse:
     reason: Any
     # passwd dict (only populated on authenticate calls)
     user_info: dict | None = None
-
-
-@dataclass(slots=True)
-class ConversationThreadState:
-    """State passed to conversation callback thread"""
-    # Thread synchronization
-    main_thread_id: int
-    input_queue: queue.Queue
-    output_queue: queue.Queue
-    done_event: threading.Event
-
-    # PAM context parameters (kwargs for truenas_pypam.get_context)
-    service_name: str = 'login'  # First positional arg
-    user: str = None  # Required kwarg
-    conversation_function: Optional[Callable] = None
-    # Will be set to self
-    conversation_private_data: Any = None
-    confdir: Optional[str] = None  # Config directory
-    rhost: Optional[str] = None  # Remote host
-    ruser: Optional[str] = None  # Remote user
-    fail_delay: int = 0  # Fail delay in microseconds
-    pam_env: dict[str, str] = None  # PAM environment variables to set
-
-    # Results
-    exception: Optional[Exception] = None
-    pam_context: Optional[Any] = None  # PAM context on success
-
-
-def _auth_thread_worker(thread_state: ConversationThreadState):
-    """
-    Worker thread that performs PAM authentication.
-    This is a module-level function to prevent access to instance variables.
-    """
-    try:
-        # Build kwargs dict for get_context
-        kwargs = {
-            'user': thread_state.user,
-            'conversation_function': thread_state.conversation_function,
-            # Pass thread_state as private data
-            'conversation_private_data': thread_state
-        }
-
-        # Add optional parameters if provided
-        if thread_state.confdir is not None:
-            kwargs['confdir'] = thread_state.confdir
-        if thread_state.rhost is not None:
-            kwargs['rhost'] = thread_state.rhost
-        if thread_state.ruser is not None:
-            kwargs['ruser'] = thread_state.ruser
-        if thread_state.fail_delay != 0:
-            kwargs['fail_delay'] = thread_state.fail_delay
-
-        # Add service_name as keyword argument
-        kwargs['service_name'] = thread_state.service_name
-
-        # Create PAM context (all args are keyword-only)
-        ctx = truenas_pypam.get_context(**kwargs)
-
-        # Set PAM environment variables if provided
-        if thread_state.pam_env:
-            for key, value in thread_state.pam_env.items():
-                ctx.set_env(name=key, value=value)
-
-        thread_state.pam_context = ctx
-        ctx.authenticate()
-
-    except Exception as e:
-        thread_state.exception = e
-    finally:
-        thread_state.done_event.set()
-
-
-def _conv_callback(ctx, messages, private_data: ConversationThreadState):
-    """
-    PAM conversation callback that runs in authentication thread.
-    Communicates with main thread via queues.
-    Module-level function to prevent access to instance variables.
-    """
-    # Verify we're not in the main thread (programming error check)
-    if threading.current_thread().ident == private_data.main_thread_id:
-        raise RuntimeError(
-            "PAM conversation callback called from main thread - "
-            "this should not happen"
-        )
-
-    # Send messages to main thread
-    private_data.output_queue.put(messages)
-
-    # Wait for responses with timeout
-    while not private_data.done_event.is_set():
-        try:
-            responses = private_data.input_queue.get(timeout=1.0)
-            return responses
-        except queue.Empty:
-            continue
-
-    # If done event is set, return empty responses
-    return [None] * len(messages)
 
 
 def _conv_callback_simple(ctx, messages, private_data):
@@ -190,8 +89,6 @@ class UserPamAuthenticator:
         # truenas_pypam context - only set after successful auth
         self.dbid = 0
         self.ctx = None
-        self._auth_thread = None
-        self._thread_state = None
 
     def check_stage(self, expected: AuthenticatorStage):
         if self.state.stage is not expected:
@@ -200,66 +97,14 @@ class UserPamAuthenticator:
                 f'Expected: {expected}'
             )
 
-    def _wait_for_auth_result(self) -> AuthenticatorResponse:
-        """
-        Wait for authentication thread to either complete or send conversation request.
-        Common logic for auth_init and auth_continue.
-        """
-        start_time = time.monotonic()
-        while not self._thread_state.done_event.is_set():
-            # Check timeout
-            if time.monotonic() - start_time > self.authentication_timeout:
-                self.end()
-                return AuthenticatorResponse(
-                    AuthenticatorStage.AUTH,
-                    truenas_pypam.PAMCode.PAM_SYSTEM_ERR,
-                    f"Authentication timeout after "
-                    f"{self.authentication_timeout} seconds"
-                )
-
-            try:
-                # Check for conversation requests
-                messages = self._thread_state.output_queue.get(timeout=0.1)
-                return AuthenticatorResponse(
-                    AuthenticatorStage.AUTH,
-                    truenas_pypam.PAMCode.PAM_CONV_AGAIN,
-                    messages
-                )
-            except queue.Empty:
-                continue
-
-        # Authentication completed
-        self._auth_thread.join()
-
-        if self._thread_state.exception:
-            if isinstance(self._thread_state.exception, truenas_pypam.PAMError):
-                code = self._thread_state.exception.code
-                reason = str(self._thread_state.exception)
-            else:
-                code = truenas_pypam.PAMCode.PAM_SYSTEM_ERR
-                reason = str(self._thread_state.exception)
-
-            if self.state.otpw_possible:
-                # When this flag is set we want to keep the PAM context around
-                # until cleanup or explicit consumer call of self.end()
-                self.ctx = self._thread_state.pam_context
-            else:
-                self.end()
-
-            return AuthenticatorResponse(AuthenticatorStage.AUTH, code, reason)
-
-        self.ctx = self._thread_state.pam_context
+    def _handle_auth_result(self, result) -> AuthenticatorResponse:
+        if result is not None:
+            return AuthenticatorResponse(AuthenticatorStage.AUTH,
+                                         truenas_pypam.PAMCode.PAM_CONV_AGAIN, result)
         self.state.stage = AuthenticatorStage.LOGIN
-        user_info = {
-            'pw_name': self.username,
-            'account_attributes': []
-        }
-        return AuthenticatorResponse(
-            AuthenticatorStage.AUTH,
-            truenas_pypam.PAMCode.PAM_SUCCESS,
-            None,
-            user_info
-        )
+        user_info = {'pw_name': self.username, 'account_attributes': []}
+        return AuthenticatorResponse(AuthenticatorStage.AUTH, truenas_pypam.PAMCode.PAM_SUCCESS,
+                                     None, user_info)
 
     def auth_init(self) -> AuthenticatorResponse:
         """
@@ -268,45 +113,38 @@ class UserPamAuthenticator:
         Returns PAM_CONV_AGAIN with conversation messages in the reason field.
         Use auth_continue() to provide responses.
         """
-        # Ensure no authentication is already in progress
-        if self._thread_state or self._auth_thread:
+        if self.ctx is not None:
             raise RuntimeError("Authentication already in progress")
 
         self.check_stage(AuthenticatorStage.START)
 
-        # When we're dealing with API keys, we pass concatenated username
-        # and API key ID to the PAM stack.
-        if self.dbid:
-            username = f'{self.username}:{self.dbid}'
-        else:
-            username = self.username
+        username = f'{self.username}:{self.dbid}' if self.dbid else self.username
+        ctx_args = {'user': username, 'service_name': self.state.service}
+        if self.rhost is not None:
+            ctx_args['rhost'] = self.rhost
+        if self.ruser is not None:
+            ctx_args['ruser'] = self.ruser
+        if self.fail_delay is not None:
+            ctx_args['fail_delay'] = self.fail_delay
 
-        # Create thread communication state with all PAM parameters
-        self._thread_state = ConversationThreadState(
-            main_thread_id=threading.current_thread().ident,
-            input_queue=queue.Queue(),
-            output_queue=queue.Queue(),
-            done_event=threading.Event(),
-            service_name=self.state.service,
-            user=username,
-            conversation_function=_conv_callback,
-            rhost=self.rhost,
-            ruser=self.ruser,
-            fail_delay=self.fail_delay if self.fail_delay is not None else 0,
-            pam_env=self.pam_env
-        )
-
-        # Start authentication thread with module-level worker function
-        self._auth_thread = threading.Thread(
-            target=_auth_thread_worker,
-            args=(self._thread_state,),
-            daemon=True
-        )
-        self._auth_thread.start()
+        self.ctx = truenas_pypam.get_context(**ctx_args)
+        for key, value in self.pam_env.items():
+            self.ctx.set_env(name=key, value=value)
 
         self.state.stage = AuthenticatorStage.AUTH
 
-        return self._wait_for_auth_result()
+        try:
+            result = self.ctx.begin_authentication(timeout=self.authentication_timeout)
+        except TimeoutError:
+            self.end()
+            return AuthenticatorResponse(AuthenticatorStage.AUTH, truenas_pypam.PAMCode.PAM_SYSTEM_ERR,
+                                         f"Authentication timeout after {self.authentication_timeout} seconds")
+        except truenas_pypam.PAMError as e:
+            if not self.state.otpw_possible:
+                self.end()
+            return AuthenticatorResponse(AuthenticatorStage.AUTH, e.code, str(e))
+
+        return self._handle_auth_result(result)
 
     def auth_continue(self, responses: List[Optional[str]]) -> AuthenticatorResponse:
         """
@@ -318,14 +156,21 @@ class UserPamAuthenticator:
         """
         if self.state.stage != AuthenticatorStage.AUTH:
             raise RuntimeError(f"Not in AUTH stage (current: {self.state.stage})")
-
-        if not self._thread_state or not self._auth_thread:
+        if self.ctx is None:
             raise RuntimeError("No authentication in progress")
 
-        # Send responses to auth thread
-        self._thread_state.input_queue.put(responses)
+        try:
+            result = self.ctx.continue_authentication(responses, timeout=self.authentication_timeout)
+        except TimeoutError:
+            self.end()
+            return AuthenticatorResponse(AuthenticatorStage.AUTH, truenas_pypam.PAMCode.PAM_SYSTEM_ERR,
+                                         f"Authentication timeout after {self.authentication_timeout} seconds")
+        except truenas_pypam.PAMError as e:
+            if not self.state.otpw_possible:
+                self.end()
+            return AuthenticatorResponse(AuthenticatorStage.AUTH, e.code, str(e))
 
-        return self._wait_for_auth_result()
+        return self._handle_auth_result(result)
 
     def account_management(self) -> AuthenticatorResponse:
         self.check_stage(AuthenticatorStage.LOGIN)
@@ -334,11 +179,6 @@ class UserPamAuthenticator:
             raise RuntimeError(
                 "No PAM context available - authentication may not have completed"
             )
-
-        # Swap to simple conversation callback to avoid thread issues
-        # acct_mgmt() typically doesn't need conversation, but if it does,
-        # we don't want to trigger the complex threaded callback
-        self.ctx.set_conversation(conversation_function=_conv_callback_simple)
 
         try:
             self.ctx.acct_mgmt()
@@ -389,28 +229,8 @@ class UserPamAuthenticator:
         return AuthenticatorResponse(AuthenticatorStage.CLOSE_SESSION, code, reason)
 
     def end(self) -> None:
-        """Clean up PAM context and reset state."""
-        # Cancel any ongoing authentication
-        if self._thread_state:
-            self._thread_state.done_event.set()
-            if self._auth_thread and self._auth_thread.is_alive():
-                try:
-                    self._auth_thread.join(timeout=2.0)
-                except TypeError:
-                    # possibly TOCTOU on is_alive and thread tearing down
-                    # when thread tears down completely self._auth_thread
-                    # will be None possibly causing TypeError here
-                    pass
-
-            self._thread_state.input_queue.shutdown(immediate=True)
-            self._thread_state.output_queue.shutdown(immediate=True)
-            self._thread_state.pam_context = None
-
-        # Reset state
+        self.ctx = None   # dealloc cancels any pending C auth thread
         self.state = AuthenticatorState(service=self.state.service)
-        self.ctx = None
-        self._thread_state = None
-        self._auth_thread = None
 
     def login(self) -> AuthenticatorResponse:
         """Perform login operations including opening session."""
@@ -520,10 +340,10 @@ class SimpleAuthenticator(UserPamAuthenticator):
             stage=AuthenticatorStage.AUTH,
             code=truenas_pypam.PAMCode.PAM_SUCCESS,
             reason=None,
-            user_info = user_info
+            user_info=user_info
         )
 
-    def auth_continue(self) ->AuthenticatorResponse:
+    def auth_continue(self) -> AuthenticatorResponse:
         raise NotImplementedError
 
     def authenticate_simple(self) -> bool:

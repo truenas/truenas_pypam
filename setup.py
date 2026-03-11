@@ -5,6 +5,7 @@ truenas_pypam_ext = Extension(
     sources=[
         'src/ext/truenas_pypam.c',
         'src/ext/py_acct_mgmt.c',
+        'src/ext/py_auth_thread.c',
         'src/ext/py_auth.c',
         'src/ext/py_chauthtok.c',
         'src/ext/py_ctx.c',
