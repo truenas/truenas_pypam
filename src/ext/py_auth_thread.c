@@ -74,6 +74,7 @@
  *  |   pthread_join()               unwind cleanly and the thread exits]
  */
 #define PY_SSIZE_T_CLEAN
+#include <signal.h>
 #include <string.h>
 #include "truenas_pypam.h"
 
