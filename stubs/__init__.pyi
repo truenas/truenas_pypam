@@ -87,8 +87,8 @@ class PAMError(RuntimeError):
 
 
 def get_context(
-    service_name: str = ...,
     *,
+    service_name: str = ...,
     user: str,
     conversation_function: Callable[[PamContext, tuple[struct_pam_message, ...], object], Sequence[str | None]] | None = ...,
     conversation_private_data: object = ...,

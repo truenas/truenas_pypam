@@ -125,13 +125,15 @@ class UserPamAuthenticator:
         self.check_stage(AuthenticatorStage.START)
 
         username = f'{self.username}:{self.dbid}' if self.dbid else self.username
-        self.ctx = truenas_pypam.get_context(
-            self.state.service,
-            user=username,
-            rhost=self.rhost,
-            ruser=self.ruser,
-            fail_delay=self.fail_delay if self.fail_delay is not None else 0,
-        )
+        ctx_args: dict[str, Any] = {'user': username, 'service_name': self.state.service}
+        if self.rhost is not None:
+            ctx_args['rhost'] = self.rhost
+        if self.ruser is not None:
+            ctx_args['ruser'] = self.ruser
+        if self.fail_delay is not None:
+            ctx_args['fail_delay'] = self.fail_delay
+
+        self.ctx = truenas_pypam.get_context(**ctx_args)
         for key, value in self.pam_env.items():
             self.ctx.set_env(name=key, value=value)
 
@@ -293,15 +295,20 @@ class SimpleAuthenticator(UserPamAuthenticator):
         provided in the init method """
         self.check_stage(AuthenticatorStage.START)
 
-        ctx = truenas_pypam.get_context(
-            self.state.service,
-            user=self.username,
-            conversation_function=_conv_callback_simple,
-            conversation_private_data={'username': self.username, 'password': self.password},
-            rhost=self.rhost,
-            ruser=self.ruser,
-            fail_delay=self.fail_delay if self.fail_delay else 0,
-        )
+        pam_ctx_args: dict[str, Any] = {
+            'user': self.username,
+            'conversation_function': _conv_callback_simple,
+            'conversation_private_data': {'username': self.username, 'password': self.password},
+            'service_name': self.state.service,
+        }
+        if self.rhost is not None:
+            pam_ctx_args['rhost'] = self.rhost
+        if self.ruser is not None:
+            pam_ctx_args['ruser'] = self.ruser
+        if self.fail_delay:
+            pam_ctx_args['fail_delay'] = self.fail_delay
+
+        ctx = truenas_pypam.get_context(**pam_ctx_args)
 
         if self.pam_env:
             for key, value in self.pam_env.items():
