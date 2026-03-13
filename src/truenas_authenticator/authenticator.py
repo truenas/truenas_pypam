@@ -4,6 +4,8 @@
 # wrapper that will furnish account details and finalized
 # work on pam_truenas.
 
+from __future__ import annotations
+
 import enum
 import truenas_pypam
 from dataclasses import dataclass
@@ -30,9 +32,9 @@ class AuthenticatorState:
     """ The authenticator supports authentication using single-use passwords. """
     login_at: datetime | None = None
     """ Time at which session performed actual login """
-    passwd: dict | None = None
+    passwd: dict[str, Any] | None = None
     """ passwd dict entry for user """
-    messages: list | None = None
+    messages: list[Any] | None = None
     """ Messages received during PAM conversation """
 
 
@@ -43,11 +45,15 @@ class AuthenticatorResponse:
     # reason for non-success OR conversation messages when PAM_CONV_AGAIN
     reason: Any
     # passwd dict (only populated on authenticate calls)
-    user_info: dict | None = None
+    user_info: dict[str, Any] | None = None
 
 
-def _conv_callback_simple(ctx, messages, private_data):
-    reply = []
+def _conv_callback_simple(
+    ctx: truenas_pypam.PamContext,
+    messages: tuple[truenas_pypam.struct_pam_message, ...],
+    private_data: Any,
+) -> list[str | None]:
+    reply: list[str | None] = []
     for m in messages:
         if m.msg_style == truenas_pypam.MSGStyle.PAM_PROMPT_ECHO_OFF:
             resp = private_data['password']
@@ -88,16 +94,16 @@ class UserPamAuthenticator:
         self.state = AuthenticatorState(service=service)
         # truenas_pypam context - only set after successful auth
         self.dbid = 0
-        self.ctx = None
+        self.ctx: truenas_pypam.PamContext | None = None
 
-    def check_stage(self, expected: AuthenticatorStage):
+    def check_stage(self, expected: AuthenticatorStage) -> None:
         if self.state.stage is not expected:
             raise RuntimeError(
                 f'{self.state.stage}: unexpected authenticator run state. '
                 f'Expected: {expected}'
             )
 
-    def _handle_auth_result(self, result) -> AuthenticatorResponse:
+    def _handle_auth_result(self, result: tuple[truenas_pypam.struct_pam_message, ...] | None) -> AuthenticatorResponse:
         if result is not None:
             return AuthenticatorResponse(AuthenticatorStage.AUTH,
                                          truenas_pypam.PAMCode.PAM_CONV_AGAIN, result)
@@ -119,7 +125,7 @@ class UserPamAuthenticator:
         self.check_stage(AuthenticatorStage.START)
 
         username = f'{self.username}:{self.dbid}' if self.dbid else self.username
-        ctx_args = {'user': username, 'service_name': self.state.service}
+        ctx_args: dict[str, Any] = {'user': username, 'service_name': self.state.service}
         if self.rhost is not None:
             ctx_args['rhost'] = self.rhost
         if self.ruser is not None:
@@ -142,7 +148,7 @@ class UserPamAuthenticator:
         except truenas_pypam.PAMError as e:
             if not self.state.otpw_possible:
                 self.end()
-            return AuthenticatorResponse(AuthenticatorStage.AUTH, e.code, str(e))
+            return AuthenticatorResponse(AuthenticatorStage.AUTH, truenas_pypam.PAMCode(e.code), str(e))
 
         return self._handle_auth_result(result)
 
@@ -168,7 +174,7 @@ class UserPamAuthenticator:
         except truenas_pypam.PAMError as e:
             if not self.state.otpw_possible:
                 self.end()
-            return AuthenticatorResponse(AuthenticatorStage.AUTH, e.code, str(e))
+            return AuthenticatorResponse(AuthenticatorStage.AUTH, truenas_pypam.PAMCode(e.code), str(e))
 
         return self._handle_auth_result(result)
 
@@ -185,7 +191,7 @@ class UserPamAuthenticator:
             code = truenas_pypam.PAMCode.PAM_SUCCESS
             reason = None
         except truenas_pypam.PAMError as e:
-            code = e.code
+            code = truenas_pypam.PAMCode(e.code)
             reason = str(e)
 
         # The account management and authentication stages blend together in some
@@ -206,7 +212,7 @@ class UserPamAuthenticator:
             code = truenas_pypam.PAMCode.PAM_SUCCESS
             reason = None
         except truenas_pypam.PAMError as e:
-            code = e.code
+            code = truenas_pypam.PAMCode(e.code)
             reason = str(e)
 
         return AuthenticatorResponse(AuthenticatorStage.OPEN_SESSION, code, reason)
@@ -223,7 +229,7 @@ class UserPamAuthenticator:
             code = truenas_pypam.PAMCode.PAM_SUCCESS
             reason = None
         except truenas_pypam.PAMError as e:
-            code = e.code
+            code = truenas_pypam.PAMCode(e.code)
             reason = str(e)
 
         return AuthenticatorResponse(AuthenticatorStage.CLOSE_SESSION, code, reason)
@@ -263,11 +269,11 @@ class UserPamAuthenticator:
         return AuthenticatorResponse(AuthenticatorStage.LOGOUT, resp.code, resp.reason)
 
     @property
-    def login_at(self) -> datetime:
+    def login_at(self) -> datetime | None:
         """Return the login timestamp."""
         return self.state.login_at
 
-    def __del__(self):
+    def __del__(self) -> None:
         if self.state.stage is AuthenticatorStage.LOGOUT:
             try:
                 self.logout()
@@ -277,12 +283,10 @@ class UserPamAuthenticator:
         else:
             self.end()
 
-        self.state = None
-
 
 class SimpleAuthenticator(UserPamAuthenticator):
     """Simple authenticator with basic username/password authentication."""
-    def __init__(self, **kwargs):
+    def __init__(self, **kwargs: Any) -> None:
         self.password = kwargs.pop('password', '')
         super().__init__(**kwargs)
 
@@ -291,17 +295,12 @@ class SimpleAuthenticator(UserPamAuthenticator):
         provided in the init method """
         self.check_stage(AuthenticatorStage.START)
 
-        pam_ctx_args = {
+        pam_ctx_args: dict[str, Any] = {
             'user': self.username,
             'conversation_function': _conv_callback_simple,
-            # Pass thread_state as private data
-            'conversation_private_data': {
-                'username': self.username,
-                'password': self.password
-            },
-            'service_name': self.state.service
+            'conversation_private_data': {'username': self.username, 'password': self.password},
+            'service_name': self.state.service,
         }
-
         if self.rhost is not None:
             pam_ctx_args['rhost'] = self.rhost
         if self.ruser is not None:
@@ -315,15 +314,13 @@ class SimpleAuthenticator(UserPamAuthenticator):
             for key, value in self.pam_env.items():
                 ctx.set_env(name=key, value=value)
 
+        code: truenas_pypam.PAMCode = truenas_pypam.PAMCode.PAM_SYSTEM_ERR
         try:
             ctx.authenticate()
         except Exception as exc:
             reason = str(exc)
             if isinstance(exc, truenas_pypam.PAMError):
-                code = exc.code
-            else:
-                code = truenas_pypam.PAMCode.PAM_SYSTEM_ERR
-
+                code = truenas_pypam.PAMCode(exc.code)
             return AuthenticatorResponse(AuthenticatorStage.AUTH, code, reason)
         finally:
             self.password = None
@@ -343,7 +340,7 @@ class SimpleAuthenticator(UserPamAuthenticator):
             user_info=user_info
         )
 
-    def auth_continue(self) -> AuthenticatorResponse:
+    def auth_continue(self, responses: list[str | None]) -> AuthenticatorResponse:
         raise NotImplementedError
 
     def authenticate_simple(self) -> bool:

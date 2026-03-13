@@ -20,7 +20,11 @@ truenas_pypam_ext = Extension(
 )
 
 setup(
-    packages=['truenas_authenticator'],
-    package_dir={'truenas_authenticator': 'src/truenas_authenticator'},
+    packages=['truenas_authenticator', 'truenas_pypam'],
+    package_dir={
+        'truenas_authenticator': 'src/truenas_authenticator',
+        'truenas_pypam': 'stubs',
+    },
+    package_data={'truenas_pypam': ['*.pyi', 'py.typed']},
     ext_modules=[truenas_pypam_ext]
 )

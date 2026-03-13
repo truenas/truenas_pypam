@@ -20,7 +20,7 @@ jobs:
         apt update
         apt install -y libpam0g-dev libbsd-dev python3-dev build-essential devscripts debhelper libpam-oath oathtool
         apt install -y debhelper dh-python pybuild-plugin-pyproject python3-pytest python3-all-dev
-        apt install -y python3-pip python3-setuptools python3-build
+        apt install -y python3-pip python3-setuptools python3-build python3-mypy
 
     - name: Test Debian package build
       run: |
@@ -30,3 +30,16 @@ jobs:
       run: |
         dpkg -i ../python3-truenas-pypam_*.deb
         python3 -m pytest tests/ -v
+
+    - name: Run stub checks
+      run: |
+        # Check stubs are internally self-consistent
+        python3 -m mypy stubs/
+
+        # Check stubs match the installed C extension runtime.
+        # truenas_pypam is a flat C extension with no submodules, so
+        # stubtest can be called directly (no sys.modules workaround needed).
+        python3 -m mypy.stubtest truenas_pypam
+
+        # Type-check the truenas_authenticator Python package
+        python3 -m mypy src/truenas_authenticator/
