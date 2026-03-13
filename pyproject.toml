@@ -22,5 +22,8 @@ classifiers = [
 ]
 
 [tool.setuptools]
-packages = ["truenas_authenticator"]
-package-dir = {"truenas_authenticator" = "src/truenas_authenticator"}
+packages = ["truenas_authenticator", "truenas_pypam"]
+package-dir = {"truenas_authenticator" = "src/truenas_authenticator", "truenas_pypam" = "stubs"}
+
+[tool.setuptools.package-data]
+truenas_pypam = ["*.pyi", "py.typed"]
