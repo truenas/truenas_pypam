@@ -18,7 +18,6 @@ from .authenticator import (
 
 __all__ = [
     'UserPamAuthenticator',
-    'ApiKeyPamAuthenticator',
     'SimpleAuthenticator',
     'AuthenticatorStage',
     'AuthenticatorState',
