@@ -478,7 +478,7 @@ py_tnpam_set_conversation(tnpam_ctx_t *self, PyObject *args, PyObject *kwds)
 }
 
 PyDoc_STRVAR(py_tnpam_begin_authentication__doc__,
-"begin_authentication(*, silent=False, disallow_null_authtok=False, timeout=None)\n"
+"begin_authentication(*, silent=False, disallow_null_authtok=False, timeout=0)\n"
 "---------------------------------------------------------------------------------\n\n"
 "Start PAM authentication on an internal C thread.\n\n"
 "Only valid for contexts created without a conversation_function. Launches\n"
@@ -490,9 +490,9 @@ PyDoc_STRVAR(py_tnpam_begin_authentication__doc__,
 "    Do not emit any messages during authentication (default=False).\n"
 "disallow_null_authtok : bool, optional\n"
 "    Return PAM_AUTH_ERR if the user has no authentication token (default=False).\n"
-"timeout : float or None, optional\n"
+"timeout : int, optional\n"
 "    Maximum seconds to wait for the first conversation or completion.\n"
-"    None means wait indefinitely (default=None).\n\n"
+"    0 means wait indefinitely (default=0). Maximum is 300.\n\n"
 "Returns\n"
 "-------\n"
 "tuple of struct_pam_message\n"
@@ -505,13 +505,15 @@ PyDoc_STRVAR(py_tnpam_begin_authentication__doc__,
 "    Authentication failed.\n"
 "TimeoutError\n"
 "    The timeout was exceeded.\n"
+"ValueError\n"
+"    timeout exceeds the 300 second maximum.\n"
 "RuntimeError\n"
 "    Called on a context that has a conversation_function, or authentication\n"
 "    is already in progress.\n"
 );
 
 PyDoc_STRVAR(py_tnpam_continue_authentication__doc__,
-"continue_authentication(responses, *, timeout=None)\n"
+"continue_authentication(responses, *, timeout=0)\n"
 "-----------------------------------------------------\n\n"
 "Send responses to a pending PAM conversation and wait for the next step.\n\n"
 "Must be called after begin_authentication() or a previous call to this\n"
@@ -521,9 +523,9 @@ PyDoc_STRVAR(py_tnpam_continue_authentication__doc__,
 "responses : iterable of str or None\n"
 "    One response per pending message, in order. Use None for messages\n"
 "    that do not require a reply (PAM_TEXT_INFO, PAM_ERROR_MSG).\n"
-"timeout : float or None, optional\n"
+"timeout : int, optional\n"
 "    Maximum seconds to wait for the next conversation or completion.\n"
-"    None means wait indefinitely (default=None).\n\n"
+"    0 means wait indefinitely (default=0). Maximum is 300.\n\n"
 "Returns\n"
 "-------\n"
 "tuple of struct_pam_message\n"
@@ -536,6 +538,8 @@ PyDoc_STRVAR(py_tnpam_continue_authentication__doc__,
 "    Authentication failed.\n"
 "TimeoutError\n"
 "    The timeout was exceeded.\n"
+"ValueError\n"
+"    timeout exceeds the 300 second maximum.\n"
 "RuntimeError\n"
 "    No conversation is currently pending.\n"
 );
@@ -647,7 +651,7 @@ static PyGetSetDef py_tnpam_ctx_getsetters[] = {
 };
 
 PyDoc_STRVAR(PyPamCtx_Type__doc__,
-"PamContext(service_name='login', *, user, conversation_function,\n"
+"PamContext(*, service_name='login', user, conversation_function=None,\n"
 "           conversation_private_data=None, confdir=None, rhost=None,\n"
 "           ruser=None, fail_delay=0)\n"
 "----------------------------------------------------------------\n\n"

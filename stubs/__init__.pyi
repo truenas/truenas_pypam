@@ -5,17 +5,22 @@ from typing import ClassVar, final, type_check_only
 
 @type_check_only
 @final
-class struct_pam_message:
+class struct_pam_message(tuple[MSGStyle, str]):
     n_fields: ClassVar[int]
     n_sequence_fields: ClassVar[int]
     n_unnamed_fields: ClassVar[int]
-    msg_style: MSGStyle
-    msg: str
+    @property
+    def msg_style(self) -> MSGStyle: ...
+    @property
+    def msg(self) -> str: ...
 
 
 @type_check_only
 @final
 class PamContext:
+    user: str | None
+    ruser: str | None
+    rhost: str | None
     def authenticate(self, *, silent: bool = ..., disallow_null_authtok: bool = ...) -> None: ...
     def begin_authentication(self, *, silent: bool = ..., disallow_null_authtok: bool = ..., timeout: int = ...) -> tuple[struct_pam_message, ...] | None: ...
     def continue_authentication(self, responses: Sequence[str | None], *, timeout: int = ...) -> tuple[struct_pam_message, ...] | None: ...
@@ -24,9 +29,11 @@ class PamContext:
     def open_session(self, *, silent: bool = ...) -> None: ...
     def close_session(self, *, silent: bool = ...) -> None: ...
     def setcred(self, *, operation: CredOp, silent: bool = ...) -> None: ...
-    def get_env(self, *, name: str) -> str | None: ...
+    def get_env(self, name: str) -> str: ...
     def set_env(self, *, name: str, value: str | None = ..., readonly: bool = ...) -> None: ...
     def env_dict(self) -> dict[str, str]: ...
+    def messages(self) -> tuple[tuple[struct_pam_message, ...], ...]: ...
+    def set_conversation(self, *, conversation_function: Callable[[PamContext, tuple[struct_pam_message, ...], object], Sequence[str | None]]) -> None: ...
 
 
 class PAMCode(enum.IntEnum):
@@ -79,7 +86,7 @@ class CredOp(enum.IntEnum):
 
 
 class PAMError(RuntimeError):
-    code: int
+    code: PAMCode
     name: str
     err_str: str
     message: str

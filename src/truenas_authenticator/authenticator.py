@@ -10,7 +10,7 @@ import enum
 import truenas_pypam
 from dataclasses import dataclass
 from datetime import datetime, UTC
-from typing import Optional, List, Any
+from typing import Optional, Sequence, Any
 
 
 class AuthenticatorStage(enum.StrEnum):
@@ -152,7 +152,7 @@ class UserPamAuthenticator[R = AuthenticatorResponse]:
 
         return self._handle_auth_result(result)
 
-    def auth_continue(self, responses: List[Optional[str]]) -> R:
+    def auth_continue(self, responses: Sequence[Optional[str]]) -> R:
         """
         Continue authentication by providing responses to conversation messages.
 
