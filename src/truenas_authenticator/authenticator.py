@@ -67,7 +67,7 @@ def _conv_callback_simple(
     return reply
 
 
-class UserPamAuthenticator[AuthenticatorResponseType = AuthenticatorResponse]:
+class UserPamAuthenticator[AuthenticatorResponseType: AuthenticatorResponse = AuthenticatorResponse]:
     """
     TrueNAS authenticator object using truenas_pypam extension.
     These are allocated per session and hold an open pam handle with
@@ -340,7 +340,7 @@ class SimpleAuthenticator(UserPamAuthenticator):
             user_info=user_info
         )
 
-    def auth_continue(self, responses: list[str | None]) -> AuthenticatorResponse:
+    def auth_continue(self, responses: Sequence[str | None]) -> AuthenticatorResponse:
         raise NotImplementedError
 
     def authenticate_simple(self) -> bool:
