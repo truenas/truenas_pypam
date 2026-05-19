@@ -25,6 +25,9 @@ setup(
         'truenas_authenticator': 'src/truenas_authenticator',
         'truenas_pypam': 'stubs',
     },
-    package_data={'truenas_pypam': ['*.pyi', 'py.typed']},
+    package_data={
+        'truenas_authenticator': ['py.typed'],
+        'truenas_pypam': ['*.pyi', 'py.typed'],
+    },
     ext_modules=[truenas_pypam_ext]
 )

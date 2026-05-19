@@ -244,8 +244,8 @@ PyDoc_STRVAR(py_pam_exception__doc__,
 "Python wrapper around an unexpected PAM response code.\n\n"
 "attributes:\n"
 "-----------\n"
-"code: int\n"
-"    PAM response code\n"
+"code: PAMCode\n"
+"    PAM response code as a PAMCode enum member\n"
 "name: str\n"
 "    Human-readable name of the response code\n"
 "err_str: str\n"
@@ -261,11 +261,39 @@ bool setup_pam_exception(PyObject *module_ref)
 	PyObject *pam_error = NULL;
 	PyObject *dict = NULL;
 	PyObject *pam_code_enum = NULL;
+	PyObject *pam_success_int = NULL;
+	PyObject *pam_success_member = NULL;
 	bool success = false;
 
+	state = (tnpam_state_t *)PyModule_GetState(module_ref);
+	if (state == NULL) {
+		goto cleanup;
+	}
+
+	// Create PAMCode IntEnum first so the class-level default for
+	// PAMError.code can be a real PAMCode enum member rather than a
+	// bare int. This keeps the class-level attribute consistent with
+	// what _set_pam_exc() puts on instances and with the stub.
+	pam_code_enum = create_pam_code_enum();
+	if (pam_code_enum == NULL) {
+		goto cleanup;
+	}
+
+	pam_success_int = PyLong_FromLong(PAM_SUCCESS);
+	if (pam_success_int == NULL) {
+		goto cleanup;
+	}
+
+	pam_success_member = PyObject_CallFunctionObjArgs(pam_code_enum,
+							  pam_success_int,
+							  NULL);
+	if (pam_success_member == NULL) {
+		goto cleanup;
+	}
+
 	// Set up spec for the new exception type
-	dict = Py_BuildValue("{s:i,s:s,s:s,s:s,s:s}",
-			     "code", PAM_SUCCESS,
+	dict = Py_BuildValue("{s:O,s:s,s:s,s:s,s:s}",
+			     "code", pam_success_member,
 			     "name", "",
 			     "err_str", "",
 			     "message", "",
@@ -283,11 +311,6 @@ bool setup_pam_exception(PyObject *module_ref)
 		goto cleanup;
 	}
 
-	state = (tnpam_state_t *)PyModule_GetState(module_ref);
-	if (state == NULL) {
-		goto cleanup;
-	}
-
 	// Add reference to our module state so that it's available generally
 	// for implementation in this extension
 	state->pam_error = Py_NewRef(pam_error);
@@ -295,12 +318,6 @@ bool setup_pam_exception(PyObject *module_ref)
 	// Add exception reference to root of module so that it's available
 	// to library consumers
 	if (PyModule_AddObjectRef(module_ref, "PAMError", pam_error) < 0) {
-		goto cleanup;
-	}
-
-	// Create and add PAMCode IntEnum
-	pam_code_enum = create_pam_code_enum();
-	if (pam_code_enum == NULL) {
 		goto cleanup;
 	}
 
@@ -314,6 +331,8 @@ bool setup_pam_exception(PyObject *module_ref)
 	success = true;
 
 cleanup:
+	Py_CLEAR(pam_success_int);
+	Py_CLEAR(pam_success_member);
 	Py_CLEAR(dict);
 	Py_CLEAR(pam_error);
 	Py_CLEAR(pam_code_enum);

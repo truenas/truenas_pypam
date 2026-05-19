@@ -10,7 +10,7 @@ import enum
 import truenas_pypam
 from dataclasses import dataclass
 from datetime import datetime, UTC
-from typing import Optional, List, Any
+from typing import Optional, Sequence, Any
 
 
 class AuthenticatorStage(enum.StrEnum):
@@ -39,13 +39,13 @@ class AuthenticatorState:
 
 
 @dataclass(slots=True)
-class AuthenticatorResponse:
+class AuthenticatorResponse[T = dict[str, Any]]:
     stage: AuthenticatorStage
     code: truenas_pypam.PAMCode  # PAM response code
     # reason for non-success OR conversation messages when PAM_CONV_AGAIN
     reason: Any
     # passwd dict (only populated on authenticate calls)
-    user_info: dict[str, Any] | None = None
+    user_info: T | None = None
 
 
 def _conv_callback_simple(
@@ -67,7 +67,7 @@ def _conv_callback_simple(
     return reply
 
 
-class UserPamAuthenticator:
+class UserPamAuthenticator[T = dict[str, Any]]:
     """
     TrueNAS authenticator object using truenas_pypam extension.
     These are allocated per session and hold an open pam handle with
@@ -103,16 +103,19 @@ class UserPamAuthenticator:
                 f'Expected: {expected}'
             )
 
-    def _handle_auth_result(self, result: tuple[truenas_pypam.struct_pam_message, ...] | None) -> AuthenticatorResponse:
+    def _handle_auth_result(
+        self,
+        result: tuple[truenas_pypam.struct_pam_message, ...] | None,
+    ) -> AuthenticatorResponse[T]:
         if result is not None:
             return AuthenticatorResponse(AuthenticatorStage.AUTH,
                                          truenas_pypam.PAMCode.PAM_CONV_AGAIN, result)
         self.state.stage = AuthenticatorStage.LOGIN
         user_info = {'pw_name': self.username, 'account_attributes': []}
         return AuthenticatorResponse(AuthenticatorStage.AUTH, truenas_pypam.PAMCode.PAM_SUCCESS,
-                                     None, user_info)
+                                     None, user_info)  # type: ignore[arg-type]
 
-    def auth_init(self) -> AuthenticatorResponse:
+    def auth_init(self) -> AuthenticatorResponse[T]:
         """
         Initialize PAM authentication.
 
@@ -152,7 +155,7 @@ class UserPamAuthenticator:
 
         return self._handle_auth_result(result)
 
-    def auth_continue(self, responses: List[Optional[str]]) -> AuthenticatorResponse:
+    def auth_continue(self, responses: Sequence[Optional[str]]) -> AuthenticatorResponse[T]:
         """
         Continue authentication by providing responses to conversation messages.
 
@@ -178,7 +181,7 @@ class UserPamAuthenticator:
 
         return self._handle_auth_result(result)
 
-    def account_management(self) -> AuthenticatorResponse:
+    def account_management(self) -> AuthenticatorResponse[T]:
         self.check_stage(AuthenticatorStage.LOGIN)
 
         if not self.ctx:
@@ -198,7 +201,7 @@ class UserPamAuthenticator:
         # modules and so we keep it as same stage
         return AuthenticatorResponse(AuthenticatorStage.AUTH, code, reason)
 
-    def open_session(self) -> AuthenticatorResponse:
+    def open_session(self) -> AuthenticatorResponse[T]:
         """Open PAM session."""
         self.check_stage(AuthenticatorStage.LOGIN)
 
@@ -217,7 +220,7 @@ class UserPamAuthenticator:
 
         return AuthenticatorResponse(AuthenticatorStage.OPEN_SESSION, code, reason)
 
-    def close_session(self) -> AuthenticatorResponse:
+    def close_session(self) -> AuthenticatorResponse[T]:
         """Close PAM session."""
         self.check_stage(AuthenticatorStage.LOGOUT)
 
@@ -238,7 +241,7 @@ class UserPamAuthenticator:
         self.ctx = None   # dealloc cancels any pending C auth thread
         self.state = AuthenticatorState(service=self.state.service)
 
-    def login(self) -> AuthenticatorResponse:
+    def login(self) -> AuthenticatorResponse[T]:
         """Perform login operations including opening session."""
         self.check_stage(AuthenticatorStage.LOGIN)
 
@@ -256,7 +259,7 @@ class UserPamAuthenticator:
             None
         )
 
-    def logout(self) -> AuthenticatorResponse:
+    def logout(self) -> AuthenticatorResponse[T]:
         """Perform logout operations including closing session."""
         self.check_stage(AuthenticatorStage.LOGOUT)
 
@@ -340,7 +343,7 @@ class SimpleAuthenticator(UserPamAuthenticator):
             user_info=user_info
         )
 
-    def auth_continue(self, responses: list[str | None]) -> AuthenticatorResponse:
+    def auth_continue(self, responses: Sequence[str | None]) -> AuthenticatorResponse:
         raise NotImplementedError
 
     def authenticate_simple(self) -> bool:

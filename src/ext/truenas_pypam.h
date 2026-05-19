@@ -219,8 +219,8 @@ extern PyObject *py_tnpam_continue_authentication(tnpam_ctx_t *self, PyObject *a
 
 /* provided by py_env.c */
 PyDoc_STRVAR(py_tnpam_getenv__doc__,
-"get_env(*, name) -> str\n"
-"-----------------------\n\n"
+"get_env(name) -> str\n"
+"--------------------\n\n"
 "Get the value of a PAM environment variable.\n\n"
 "This method wraps pam_getenv(3) and retrieves the value of the\n"
 "specified PAM environment variable. PAM environment variables\n"
