@@ -300,8 +300,11 @@ int truenas_pam_conv(int num_msg, const struct pam_message **msg,
 	PYPAM_ASSERT((ctx->conv_type == TNPAM_CONV_CALLBACK), "truenas_pam_conv called on non-callback context");
 	PYPAM_ASSERT((ctx->conv_data.py_cb.callback_fn != NULL), "Undefined callback function");
 
-	// We need to reacquire GIL and unlock the pam context
-	PYPAM_UNLOCK(ctx);
+	// Reacquire the GIL to call into Python. The handle lock stays held: the
+	// pam_*() call that drove this conversation is still on our stack, so
+	// handing the handle back here would let another thread re-enter libpam
+	// on it mid-dispatch.
+	PYPAM_CONV_GIL_ACQUIRE(ctx);
 
 	// PAM module may be making multiple attempts but we already have errored out
 	// from a python perspective
@@ -338,9 +341,8 @@ cleanup:
 	Py_CLEAR(pymsg);
 	Py_CLEAR(pyresp);
 
-	// Drop GIL and grab pthread lock on handle because we're going
-	// back into the wonderful world of pure C
-	PYPAM_LOCK(ctx);
+	// Drop the GIL because we're going back into the wonderful world of pure C
+	PYPAM_CONV_GIL_RELEASE(ctx);
 	return retval;
 }
 
@@ -369,6 +371,7 @@ tnpam_internal_conv(int num_msg, const struct pam_message **msg,
 		    struct pam_response **resp, void *appdata_ptr)
 {
 	tnpam_ctx_t *ctx = appdata_ptr;
+	int final_state;
 
 	PYPAM_ASSERT((ctx != NULL), "Unexpected NULL appdata_ptr");
 	PYPAM_ASSERT((ctx->conv_type == TNPAM_CONV_INTERNAL_THREAD), "tnpam_internal_conv called on non-thread context");
@@ -386,20 +389,32 @@ tnpam_internal_conv(int num_msg, const struct pam_message **msg,
 	ctx->conv_data.th_cb.conv_state = THREAD_STATE_CONV_PENDING;
 	pthread_cond_signal(&ctx->conv_data.th_cb.conv_cond_main);  /* wake main thread */
 
+	/*
+	 * Hand the PAM handle back while we are parked. The pam_*() call that
+	 * drove this conversation is suspended here, inside our own conversation
+	 * function, so no module code can touch the handle until we return, and
+	 * the Python thread composing the response is free to use the context in
+	 * the meantime. Dropped before the wait and retaken only after conv_mutex
+	 * is released, so the lock order is always pam_hdl_lock -> conv_mutex.
+	 */
+	tnpam_hdl_unlock(&ctx->pam_hdl_lock);
+
 	while (ctx->conv_data.th_cb.conv_state == THREAD_STATE_CONV_PENDING) {
 		pthread_cond_wait(&ctx->conv_data.th_cb.conv_cond_auth, &ctx->conv_data.th_cb.conv_mutex);
 	}
 
-	if (ctx->conv_data.th_cb.conv_state == THREAD_STATE_CONV_CANCELLED) {
-		pthread_mutex_unlock(&ctx->conv_data.th_cb.conv_mutex);
-		return PAM_CONV_ERR;
+	final_state = ctx->conv_data.th_cb.conv_state;
+	if (final_state != THREAD_STATE_CONV_CANCELLED) {
+		/* CONV_RESPONDED: pick up responses (ownership transferred to PAM) */
+		*resp = ctx->conv_data.th_cb.pending_resps;
+		ctx->conv_data.th_cb.pending_resps = NULL;
 	}
-
-	/* CONV_RESPONDED: pick up responses (ownership transferred to PAM) */
-	*resp = ctx->conv_data.th_cb.pending_resps;
-	ctx->conv_data.th_cb.pending_resps = NULL;
 	pthread_mutex_unlock(&ctx->conv_data.th_cb.conv_mutex);
-	return PAM_SUCCESS;
+
+	/* Reclaim the handle before returning into libpam. */
+	tnpam_hdl_lock(&ctx->pam_hdl_lock);
+
+	return (final_state == THREAD_STATE_CONV_CANCELLED) ? PAM_CONV_ERR : PAM_SUCCESS;
 }
 
 /*
