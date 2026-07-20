@@ -71,8 +71,11 @@ class UserPamAuthenticator:
     """
     TrueNAS authenticator object using truenas_pypam extension.
     These are allocated per session and hold an open pam handle with
-    state information. Thread-safety is handled by pthread locks in
-    the truenas_pypam extension.
+    state information.
+
+    Not safe for concurrent use: the PAM handle underneath must be driven
+    by one thread at a time, and this object's own stage tracking is
+    unsynchronized. Allocate one per session and drive it from one thread.
     """
     def __init__(
         self,

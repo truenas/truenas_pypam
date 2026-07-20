@@ -107,7 +107,7 @@ PyDoc_STRVAR(truenas_pypam_module__doc__,
 "Modules) library, allowing applications to perform user authentication,\n"
 "session management, and environment variable operations through PAM.\n\n"
 "Key Features:\n"
-"- Thread-safe PAM operations with proper GIL management\n"
+"- Serialized PAM operations with proper GIL management\n"
 "- Conversation callback support for interactive authentication\n"
 "- PAM environment variable management\n"
 "- Comprehensive error handling with PAM-specific exceptions\n\n"

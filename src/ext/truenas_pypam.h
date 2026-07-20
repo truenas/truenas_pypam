@@ -5,6 +5,7 @@
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
 #include <stdbool.h>
+#include <stdatomic.h>
 #include <pthread.h>
 #include <time.h>
 #include <errno.h>
@@ -34,6 +35,10 @@ enum {
 
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
 
+#define __stringify(x) #x
+#define __stringify2(x) __stringify(x)
+#define __location__ __FILE__ ":" __stringify2(__LINE__)
+
 /*
  * Macro to handle extreme error case in module. This should only be invoked
  * if an error condition is detected that would make it dangerous to continue.
@@ -48,16 +53,103 @@ enum {
         __PYPAM_ASSERT_IMPL(test, message, __location__);
 
 /*
- * Macros to handle taking lock and dropping GIL
+ * Lock serializing access to a PAM handle.
+ *
+ * PyMutex rather than pthread_mutex_t: it works from every context that touches
+ * a handle here. On the internal auth thread, which has no PyThreadState at all,
+ * it parks on a plain semaphore; on a thread that still holds the GIL it detaches
+ * the thread state and releases the GIL for the duration of the wait
+ * (_PySemaphore_Wait() in Python/parking_lot.c) instead of deadlocking against a
+ * holder that needs the GIL back before it can unlock. PYPAM_LOCK() drops the GIL
+ * before taking the lock, so that second path is a backstop rather than the
+ * common case, but it is what makes the lock safe to take from anywhere.
+ *
+ * The lock is recursive for the thread that owns it: a conversation callback
+ * runs nested inside the pam_*() call that already owns the handle and is handed
+ * the context object, so it has to be able to read context state without
+ * deadlocking against itself.
+ *
+ * Zero is the unlocked state, which is what tp_alloc() already gives us, and
+ * there is nothing to destroy.
+ */
+typedef struct {
+	PyMutex mutex;
+	/* (uintptr_t)pthread_self() while held, 0 when unowned */
+	_Atomic(uintptr_t) owner;
+	/* recursion count, only ever touched by the owning thread */
+	unsigned int depth;
+} tnpam_hdl_lock_t;
+
+static inline void
+tnpam_hdl_lock(tnpam_hdl_lock_t *lock)
+{
+	uintptr_t self = (uintptr_t)pthread_self();
+
+	PYPAM_ASSERT((self != 0), "pthread_self() returned a null thread identity");
+
+	if (atomic_load_explicit(&lock->owner, memory_order_acquire) == self) {
+		lock->depth++;
+		return;
+	}
+
+	PyMutex_Lock(&lock->mutex);
+	atomic_store_explicit(&lock->owner, self, memory_order_release);
+	lock->depth = 1;
+}
+
+static inline void
+tnpam_hdl_unlock(tnpam_hdl_lock_t *lock)
+{
+	PYPAM_ASSERT((atomic_load_explicit(&lock->owner, memory_order_relaxed) ==
+		      (uintptr_t)pthread_self()),
+		     "PAM handle lock released by a thread that does not hold it");
+
+	if (--lock->depth > 0) {
+		return;
+	}
+
+	atomic_store_explicit(&lock->owner, 0, memory_order_release);
+	PyMutex_Unlock(&lock->mutex);
+}
+
+/*
+ * Take the PAM handle and drop the GIL for the duration of the libpam call.
+ * Caller must hold the GIL.
+ *
+ * The GIL is dropped before the handle is taken and taken back only after the
+ * handle is released, so neither is ever held while waiting for the other. A
+ * thread blocked on the handle therefore cannot pin the GIL (the deadlock), and
+ * the handle is never held across a GIL acquisition, which would funnel every
+ * other thread through one GIL handoff per operation.
+ *
+ * ctx->_save is written and read under the handle lock, so the single slot is
+ * safe: only the owning thread touches it, and a nested acquisition from a
+ * conversation callback stores the same thread's state back into it.
  */
 #define PYPAM_LOCK(ctx) do { \
-	pthread_mutex_lock(&ctx->pam_hdl_lock); \
-	ctx->_save = PyEval_SaveThread(); \
+	PyThreadState *_pypam_ts = PyEval_SaveThread(); \
+	tnpam_hdl_lock(&(ctx)->pam_hdl_lock); \
+	(ctx)->_save = _pypam_ts; \
 } while (0);
 
 #define PYPAM_UNLOCK(ctx) do { \
-	PyEval_RestoreThread(ctx->_save); \
-	pthread_mutex_unlock(&ctx->pam_hdl_lock); \
+	PyThreadState *_pypam_ts = (ctx)->_save; \
+	tnpam_hdl_unlock(&(ctx)->pam_hdl_lock); \
+	PyEval_RestoreThread(_pypam_ts); \
+} while (0);
+
+/*
+ * Take the GIL back inside a conversation function, and give it up again on the
+ * way out, without handing back the PAM handle. The pam_*() call that drove the
+ * conversation is still on our stack, so releasing the handle here would let
+ * another thread re-enter libpam on a handle that is mid-dispatch.
+ */
+#define PYPAM_CONV_GIL_ACQUIRE(ctx) do { \
+	PyEval_RestoreThread((ctx)->_save); \
+} while (0);
+
+#define PYPAM_CONV_GIL_RELEASE(ctx) do { \
+	(ctx)->_save = PyEval_SaveThread(); \
 } while (0);
 
 
@@ -143,7 +235,7 @@ typedef struct {
 	// all PAM contexts.
 	//
 	// Generally, it's a good idea to avoid putting such modules in the PAM config.
-	pthread_mutex_t pam_hdl_lock;
+	tnpam_hdl_lock_t pam_hdl_lock;
 	// Store thread state in handle since we have conversation callbacks where
 	// we need to reacquire the GIL
 	PyThreadState *_save;
@@ -445,10 +537,6 @@ extern bool init_pam_conv_struct(PyObject *module_ref);
 extern bool setup_pam_exception(PyObject *module_ref);
 extern PyObject *py_pamcode_dict(void);
 extern void _set_pam_exc(int code, const char *additional_info, const char *location);
-
-#define __stringify(x) #x
-#define __stringify2(x) __stringify(x)
-#define __location__ __FILE__ ":" __stringify2(__LINE__)
 
 #define set_pam_exc(code, additional_info) \
 	_set_pam_exc(code, additional_info, __location__)
