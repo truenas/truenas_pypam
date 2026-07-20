@@ -123,20 +123,24 @@ tnpam_auth_thread_func(void *arg)
 }
 
 /*
- * Convert a pre-parsed unsigned int timeout (0 = no timeout) into an
- * absolute CLOCK_MONOTONIC deadline.  Rejects values above
- * TNPAM_TIMEOUT_MAX_SECS.  Returns false (with a Python exception set)
- * on error.
+ * Convert a pre-parsed timeout in seconds (0 = no timeout) into an absolute
+ * CLOCK_MONOTONIC deadline.  Rejects negative values and values above
+ * TNPAM_TIMEOUT_MAX_SECS.  Returns false (with a Python exception set) on
+ * error.
  *
- * CLOCK_MONOTONIC, matching the condition variables' clock attribute: an
+ * Parsed with the "i" format unit, not "I": "I" converts via
+ * PyLong_AsUnsignedLongMask(), which masks out-of-range values instead of
+ * raising, and 0 here means "wait indefinitely".
+ *
+ * CLOCK_MONOTONIC, matching the condition variables' clock attribute. An
  * absolute wall-clock deadline moves when the wall clock does, so an NTP
- * correction during a login would either fire the timeout instantly or push it
+ * correction during a login either fires the timeout instantly or pushes it
  * out of reach.
  */
-#define TNPAM_TIMEOUT_MAX_SECS 300U
+#define TNPAM_TIMEOUT_MAX_SECS 300
 
 static bool
-_tnpam_make_deadline(unsigned int secs, bool *has_timeout,
+_tnpam_make_deadline(int secs, bool *has_timeout,
 		     struct timespec *deadline)
 {
 	*has_timeout = false;
@@ -145,9 +149,14 @@ _tnpam_make_deadline(unsigned int secs, bool *has_timeout,
 		return true;
 	}
 
+	if (secs < 0) {
+		PyErr_SetString(PyExc_ValueError, "timeout must not be negative");
+		return false;
+	}
+
 	if (secs > TNPAM_TIMEOUT_MAX_SECS) {
 		PyErr_Format(PyExc_ValueError,
-			     "timeout must not exceed %u seconds", TNPAM_TIMEOUT_MAX_SECS);
+			     "timeout must not exceed %d seconds", TNPAM_TIMEOUT_MAX_SECS);
 		return false;
 	}
 
@@ -295,7 +304,7 @@ py_tnpam_begin_authentication(tnpam_ctx_t *self, PyObject *args, PyObject *kwds)
 	};
 	boolean_t silent = B_FALSE;
 	boolean_t disallow_null_authtok = B_FALSE;
-	unsigned int timeout_secs = 0;
+	int timeout_secs = 0;
 	int flags = 0;
 	bool has_timeout = false;
 	struct timespec deadline;
@@ -310,7 +319,7 @@ py_tnpam_begin_authentication(tnpam_ctx_t *self, PyObject *args, PyObject *kwds)
 		return NULL;
 	}
 
-	if (!PyArg_ParseTupleAndKeywords(args, kwds, "|$ppI", kwlist,
+	if (!PyArg_ParseTupleAndKeywords(args, kwds, "|$ppi", kwlist,
 					 &silent,
 					 &disallow_null_authtok,
 					 &timeout_secs)) {
@@ -378,7 +387,7 @@ py_tnpam_continue_authentication(tnpam_ctx_t *self, PyObject *args, PyObject *kw
 		NULL
 	};
 	PyObject *pyresp = NULL;
-	unsigned int timeout_secs = 0;
+	int timeout_secs = 0;
 	struct pam_response *resp = NULL;
 	bool has_timeout = false;
 	struct timespec deadline;
@@ -393,7 +402,7 @@ py_tnpam_continue_authentication(tnpam_ctx_t *self, PyObject *args, PyObject *kw
 		return NULL;
 	}
 
-	if (!PyArg_ParseTupleAndKeywords(args, kwds, "O|$I", kwlist,
+	if (!PyArg_ParseTupleAndKeywords(args, kwds, "O|$i", kwlist,
 					 &pyresp,
 					 &timeout_secs)) {
 		return NULL;

@@ -48,7 +48,6 @@ create_cred_op_enum(void)
 	PyObject *enum_module = NULL;
 	PyObject *int_enum_class = NULL;
 	PyObject *enum_dict = NULL;
-	PyObject *py_enum_name = NULL;
 	PyObject *result_enum = NULL;
 	size_t i;
 
@@ -84,17 +83,8 @@ create_cred_op_enum(void)
 		Py_DECREF(py_value);
 	}
 
-	py_enum_name = PyUnicode_FromString(MODULE_NAME ".CredOp");
-	if (py_enum_name == NULL) {
-		Py_DECREF(enum_dict);
-		Py_DECREF(int_enum_class);
-		return NULL;
-	}
+	result_enum = py_build_int_enum("CredOp", enum_dict);
 
-	result_enum = PyObject_CallFunction(int_enum_class, "OO",
-					    py_enum_name, enum_dict);
-
-	Py_DECREF(py_enum_name);
 	Py_DECREF(enum_dict);
 	Py_DECREF(int_enum_class);
 
@@ -108,6 +98,7 @@ PyObject *py_tnpam_setcred(tnpam_ctx_t *self, PyObject *args, PyObject *kwds)
 	PyObject *operation = NULL;
 	boolean_t silent = B_FALSE;
 	int flags;
+	int is_cred_op;
 	pamcode_t retval;
 	tnpam_state_t *state = NULL;
 
@@ -128,8 +119,13 @@ PyObject *py_tnpam_setcred(tnpam_ctx_t *self, PyObject *args, PyObject *kwds)
 
 	PYPAM_ASSERT((state->cred_op_enum != NULL), "CredOp enum not initialized");
 
-	// Validate that operation is an instance of CredOp enum
-	if (!PyObject_IsInstance(operation, state->cred_op_enum)) {
+	// PyObject_IsInstance is tri-state; -1 means the check itself failed.
+	is_cred_op = PyObject_IsInstance(operation, state->cred_op_enum);
+	if (is_cred_op < 0) {
+		return NULL;
+	}
+
+	if (!is_cred_op) {
 		PyErr_SetString(PyExc_TypeError,
 				"operation must be a CredOp enum member");
 		return NULL;
@@ -167,6 +163,14 @@ PyObject *py_tnpam_setcred(tnpam_ctx_t *self, PyObject *args, PyObject *kwds)
 		if (!PyErr_Occurred()) {
 			set_pam_exc(retval, "pam_setcred() failed");
 		}
+		return NULL;
+	}
+
+	/*
+	 * A conversation callback can leave an exception pending even when
+	 * the stack returns PAM_SUCCESS; see py_tnpam_authenticate().
+	 */
+	if (PyErr_Occurred()) {
 		return NULL;
 	}
 

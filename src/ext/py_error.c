@@ -8,6 +8,53 @@ typedef struct {
 	const char *name;
 } intenum_entry_t;
 
+/*
+ * Build an IntEnum from a name -> value mapping.
+ *
+ * module and qualname have to be passed explicitly. The functional API
+ * otherwise infers __module__ from the calling frame (enum.py uses
+ * sys._getframe), and during C module initialization the nearest Python frame
+ * belongs to importlib's bootstrap, leaving __module__ as "_frozen_importlib".
+ * pickle then looks the class up in that module and fails, so every member --
+ * and anything holding one, including a raised PAMError -- becomes unpicklable
+ * and cannot cross a process boundary.
+ */
+PyObject *
+py_build_int_enum(const char *name, PyObject *members)
+{
+	PyObject *enum_module = NULL;
+	PyObject *int_enum_class = NULL;
+	PyObject *args = NULL;
+	PyObject *kwargs = NULL;
+	PyObject *result = NULL;
+
+	enum_module = PyImport_ImportModule("enum");
+	if (enum_module == NULL) {
+		return NULL;
+	}
+
+	int_enum_class = PyObject_GetAttrString(enum_module, "IntEnum");
+	Py_DECREF(enum_module);
+	if (int_enum_class == NULL) {
+		return NULL;
+	}
+
+	args = Py_BuildValue("(sO)", name, members);
+	if (args != NULL) {
+		kwargs = Py_BuildValue("{s:s,s:s}", "module", MODULE_NAME,
+				       "qualname", name);
+		if (kwargs != NULL) {
+			result = PyObject_Call(int_enum_class, args, kwargs);
+		}
+	}
+
+	Py_XDECREF(kwargs);
+	Py_XDECREF(args);
+	Py_DECREF(int_enum_class);
+
+	return result;
+}
+
 /**
  * @brief Lookup table for PAM codes / names.
  *
@@ -138,12 +185,7 @@ const char *py_pamcode_to_string(int code)
 		}
 	}
 
-	PYPAM_ASSERT(
-		(code >= PAM_SUCCESS || code <= PAM_INCOMPLETE),
-		"Unexpected PAM code"
-	);
-
-	// This is impossible to hit but we're making compiler happy
+	/* A module may return a code outside the range libpam defines. */
 	return "UNKNOWN_ERROR";
 }
 
@@ -185,7 +227,6 @@ create_pam_code_enum(void)
 	PyObject *enum_module = NULL;
 	PyObject *int_enum_class = NULL;
 	PyObject *enum_dict = NULL;
-	PyObject *py_enum_name = NULL;
 	PyObject *result_enum = NULL;
 	size_t i;
 
@@ -221,17 +262,8 @@ create_pam_code_enum(void)
 		Py_DECREF(py_value);
 	}
 
-	py_enum_name = PyUnicode_FromString(MODULE_NAME ".PAMCode");
-	if (py_enum_name == NULL) {
-		Py_DECREF(enum_dict);
-		Py_DECREF(int_enum_class);
-		return NULL;
-	}
+	result_enum = py_build_int_enum("PAMCode", enum_dict);
 
-	result_enum = PyObject_CallFunction(int_enum_class, "OO",
-					    py_enum_name, enum_dict);
-
-	Py_DECREF(py_enum_name);
 	Py_DECREF(enum_dict);
 	Py_DECREF(int_enum_class);
 
@@ -261,8 +293,8 @@ bool setup_pam_exception(PyObject *module_ref)
 	PyObject *pam_error = NULL;
 	PyObject *dict = NULL;
 	PyObject *pam_code_enum = NULL;
-	PyObject *pam_success_int = NULL;
-	PyObject *pam_success_member = NULL;
+	PyObject *pam_default_code_int = NULL;
+	PyObject *pam_default_code_member = NULL;
 	bool success = false;
 
 	state = (tnpam_state_t *)PyModule_GetState(module_ref);
@@ -274,26 +306,30 @@ bool setup_pam_exception(PyObject *module_ref)
 	// PAMError.code can be a real PAMCode enum member rather than a
 	// bare int. This keeps the class-level attribute consistent with
 	// what _set_pam_exc() puts on instances and with the stub.
+	//
+	// The default must be a failure code: it is only observed when
+	// _set_pam_exc() could not assign the real one, and PAM_SUCCESS on an
+	// exception reports the failure it describes as a success.
 	pam_code_enum = create_pam_code_enum();
 	if (pam_code_enum == NULL) {
 		goto cleanup;
 	}
 
-	pam_success_int = PyLong_FromLong(PAM_SUCCESS);
-	if (pam_success_int == NULL) {
+	pam_default_code_int = PyLong_FromLong(PAM_SYSTEM_ERR);
+	if (pam_default_code_int == NULL) {
 		goto cleanup;
 	}
 
-	pam_success_member = PyObject_CallFunctionObjArgs(pam_code_enum,
-							  pam_success_int,
+	pam_default_code_member = PyObject_CallFunctionObjArgs(pam_code_enum,
+							  pam_default_code_int,
 							  NULL);
-	if (pam_success_member == NULL) {
+	if (pam_default_code_member == NULL) {
 		goto cleanup;
 	}
 
 	// Set up spec for the new exception type
 	dict = Py_BuildValue("{s:O,s:s,s:s,s:s,s:s}",
-			     "code", pam_success_member,
+			     "code", pam_default_code_member,
 			     "name", "",
 			     "err_str", "",
 			     "message", "",
@@ -331,8 +367,8 @@ bool setup_pam_exception(PyObject *module_ref)
 	success = true;
 
 cleanup:
-	Py_CLEAR(pam_success_int);
-	Py_CLEAR(pam_success_member);
+	Py_CLEAR(pam_default_code_int);
+	Py_CLEAR(pam_default_code_member);
 	Py_CLEAR(dict);
 	Py_CLEAR(pam_error);
 	Py_CLEAR(pam_code_enum);
@@ -383,12 +419,31 @@ _set_pam_exc(int code, const char *additional_info, const char *location)
 	Py_DECREF(obj);
 
 	if (enum_member == NULL) {
-		Py_CLEAR(exc);
-		return;
-	}
+		/*
+		 * Unmapped code: PAMCode() raises ValueError. Keep the
+		 * class-level default and carry on -- callers catch PAMError,
+		 * and .name and .message below still describe the failure.
+		 */
+		if (!PyErr_ExceptionMatches(PyExc_ValueError)) {
+			Py_CLEAR(exc);
+			return;
+		}
+		PyErr_Clear();
+	} else {
+		/*
+		 * Checked, unlike the string attributes below: .code is what
+		 * consumers branch on to decide whether the operation
+		 * succeeded, so it must never silently fall back to the
+		 * class-level default.
+		 */
+		int rv = PyObject_SetAttrString(exc, "code", enum_member);
 
-	PyObject_SetAttrString(exc, "code", enum_member);
-	Py_CLEAR(enum_member);
+		Py_CLEAR(enum_member);
+		if (rv < 0) {
+			Py_CLEAR(exc);
+			return;
+		}
+	}
 
 	/* set name */
 	obj = PyUnicode_FromString(name);
