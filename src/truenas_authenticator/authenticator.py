@@ -28,8 +28,6 @@ class AuthenticatorState:
     """ pam service name to be used for handle. """
     stage: AuthenticatorStage = AuthenticatorStage.START
     """ Stage of PAM session / conversation. """
-    otpw_possible: bool = False
-    """ The authenticator supports authentication using single-use passwords. """
     login_at: datetime | None = None
     """ Time at which session performed actual login """
     passwd: dict[str, Any] | None = None
@@ -111,6 +109,12 @@ class UserPamAuthenticator:
             return AuthenticatorResponse(AuthenticatorStage.AUTH,
                                          truenas_pypam.PAMCode.PAM_CONV_AGAIN, result)
         self.state.stage = AuthenticatorStage.LOGIN
+
+        # A partial mapping, not a full passwd entry: PAM reports that
+        # authentication succeeded, not who the user is. A subclass that
+        # parametrises this class with a richer user_info type must replace it;
+        # reading any other field off a base-class response raises KeyError
+        # despite what the annotation says.
         user_info = {'pw_name': self.username, 'account_attributes': []}
         return AuthenticatorResponse(AuthenticatorStage.AUTH, truenas_pypam.PAMCode.PAM_SUCCESS,
                                      None, user_info)
@@ -137,21 +141,26 @@ class UserPamAuthenticator:
             ctx_args['fail_delay'] = self.fail_delay
 
         self.ctx = truenas_pypam.get_context(**ctx_args)
-        for key, value in self.pam_env.items():
-            self.ctx.set_env(name=key, value=value)
 
-        self.state.stage = AuthenticatorStage.AUTH
-
+        # self.ctx must be cleared on every failure path from here on, or the
+        # "already in progress" check above rejects every later attempt on this
+        # object. set_env() raises PAMError, and begin_authentication() raises
+        # ValueError or OverflowError for an out-of-range timeout.
         try:
+            for key, value in self.pam_env.items():
+                self.ctx.set_env(name=key, value=value)
+            self.state.stage = AuthenticatorStage.AUTH
             result = self.ctx.begin_authentication(timeout=self.authentication_timeout)
         except TimeoutError:
             self.end()
             return AuthenticatorResponse(AuthenticatorStage.AUTH, truenas_pypam.PAMCode.PAM_SYSTEM_ERR,
                                          f"Authentication timeout after {self.authentication_timeout} seconds")
         except truenas_pypam.PAMError as e:
-            if not self.state.otpw_possible:
-                self.end()
+            self.end()
             return AuthenticatorResponse(AuthenticatorStage.AUTH, truenas_pypam.PAMCode(e.code), str(e))
+        except BaseException:
+            self.end()
+            raise
 
         return self._handle_auth_result(result)
 
@@ -175,8 +184,7 @@ class UserPamAuthenticator:
             return AuthenticatorResponse(AuthenticatorStage.AUTH, truenas_pypam.PAMCode.PAM_SYSTEM_ERR,
                                          f"Authentication timeout after {self.authentication_timeout} seconds")
         except truenas_pypam.PAMError as e:
-            if not self.state.otpw_possible:
-                self.end()
+            self.end()
             return AuthenticatorResponse(AuthenticatorStage.AUTH, truenas_pypam.PAMCode(e.code), str(e))
 
         return self._handle_auth_result(result)
@@ -324,9 +332,14 @@ class SimpleAuthenticator(UserPamAuthenticator):
             reason = str(exc)
             if isinstance(exc, truenas_pypam.PAMError):
                 code = truenas_pypam.PAMCode(exc.code)
+            # Keep the credential: the stage is still START, so the caller may
+            # retry this object after a transient failure such as
+            # PAM_AUTHINFO_UNAVAIL.
             return AuthenticatorResponse(AuthenticatorStage.AUTH, code, reason)
-        finally:
-            self.password = None
+
+        # Past the retry window. This drops our reference only; the context
+        # holds the same string in conversation_private_data for its lifetime.
+        self.password = None
 
         self.ctx = ctx
         self.state.stage = AuthenticatorStage.LOGIN

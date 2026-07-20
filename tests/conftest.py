@@ -60,8 +60,49 @@ def create_test_user():
         return False
 
 
+OATH_FILES = ('/etc/users.oath', f'/etc/pam.d/{OATH_SERVICE}')
+
+# Contents of the files above as found at session start, so they can be put
+# back afterwards. A path mapping to None was absent and gets removed again.
+_saved_oath_files: dict[str, bytes | None] = {}
+
+
+def _save_oath_files():
+    """Snapshot the files setup_oath() overwrites, once per session."""
+    for path in OATH_FILES:
+        if path in _saved_oath_files:
+            continue
+        try:
+            with open(path, 'rb') as f:
+                _saved_oath_files[path] = f.read()
+        except FileNotFoundError:
+            _saved_oath_files[path] = None
+
+
+def _restore_oath_files():
+    """Put back whatever was there before the session."""
+    for path, content in _saved_oath_files.items():
+        if content is None:
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
+        else:
+            with open(path, 'wb') as f:
+                f.write(content)
+            os.chmod(path, 0o600)
+
+
 def setup_oath():
-    """Write /etc/users.oath and /etc/pam.d/truenas-test-mfa."""
+    """Write /etc/users.oath and /etc/pam.d/truenas-test-mfa.
+
+    Both files are system-wide. On a host that uses pam_oath for real
+    two-factor authentication this replaces every registered token with a
+    single test entry whose secret is committed to this repository, so the
+    originals are snapshotted first and restored at the end of the session.
+    """
+    _save_oath_files()
+
     # pam_oath expects the secret in hex; OATH_SECRET is base32
     secret_hex = base64.b32decode(OATH_SECRET).hex()
     with open('/etc/users.oath', 'w') as f:
@@ -96,6 +137,11 @@ def pytest_sessionstart(session):
 
     if os.geteuid() == 0:
         setup_oath()
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """Restore the system files setup_oath() overwrote."""
+    _restore_oath_files()
 
 
 @pytest.fixture

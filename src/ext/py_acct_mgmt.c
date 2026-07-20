@@ -46,5 +46,13 @@ py_tnpam_acct_mgmt(tnpam_ctx_t *self, PyObject *args, PyObject *kwds)
 		return NULL;
 	}
 
+	/*
+	 * A conversation callback can leave an exception pending even when
+	 * the stack returns PAM_SUCCESS; see py_tnpam_authenticate().
+	 */
+	if (PyErr_Occurred()) {
+		return NULL;
+	}
+
 	Py_RETURN_NONE;
 }

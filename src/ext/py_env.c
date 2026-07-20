@@ -98,22 +98,31 @@ py_tnpam_envlist(tnpam_ctx_t *self, PyObject *Py_UNUSED(ignored))
 	char *envar;
 	PyObject *out = NULL;
 	int i;
+	int err;
 
+	/*
+	 * An empty environment comes back as a valid array whose first element
+	 * is NULL. pam_getenvlist() returns NULL only on failure: no handle, a
+	 * missing or corrupt environment, or an allocation failure in
+	 * _copy_env() (libpam/pam_env.c).
+	 *
+	 * errno must be captured before PYPAM_UNLOCK, which releases the handle
+	 * and reacquires the GIL; neither is required to preserve it.
+	 */
 	PYPAM_LOCK(self);
-	// manually set errno to zero to differentiate between
-	// malloc failure and simply no enviornmental variables
 	errno = 0;
 	pamenv = pam_getenvlist(self->hdl);
+	err = errno;
 	PYPAM_UNLOCK(self);
 
 	if (pamenv == NULL) {
-		if (errno == 0) {
-			// no environmental variables set
-			// return an empty dict
-			return PyDict_New();
+		if (err == ENOMEM) {
+			return PyErr_NoMemory();
 		}
-		// malloc failure
-		return PyErr_NoMemory();
+		PyErr_SetString(PyExc_RuntimeError,
+				"pam_getenvlist() failed: the PAM environment "
+				"is unavailable or corrupt");
+		return NULL;
 	}
 
 	out = PyDict_New();
