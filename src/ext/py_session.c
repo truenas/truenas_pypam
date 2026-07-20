@@ -49,6 +49,14 @@ py_tnpam_open_session(tnpam_ctx_t *self, PyObject *args, PyObject *kwds)
 		return NULL;
 	}
 
+	/*
+	 * A conversation callback can leave an exception pending even when
+	 * the stack returns PAM_SUCCESS; see py_tnpam_authenticate().
+	 */
+	if (PyErr_Occurred()) {
+		return NULL;
+	}
+
 	self->session_opened = B_TRUE;
 
 	Py_RETURN_NONE;
@@ -90,6 +98,14 @@ py_tnpam_close_session(tnpam_ctx_t *self, PyObject *args, PyObject *kwds)
 		if (!PyErr_Occurred()) {
 			set_pam_exc(ret, "pam_close_session() failed");
 		}
+		return NULL;
+	}
+
+	/*
+	 * A conversation callback can leave an exception pending even when
+	 * the stack returns PAM_SUCCESS; see py_tnpam_authenticate().
+	 */
+	if (PyErr_Occurred()) {
 		return NULL;
 	}
 

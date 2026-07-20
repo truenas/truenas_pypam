@@ -93,14 +93,18 @@ class PAMError(RuntimeError):
     location: str
 
 
+# None is not accepted for any of these: the C parser uses the "s" converter
+# for the string arguments, which rejects None, and requires a callable for
+# conversation_function. Omit the keyword instead -- passing None explicitly
+# raises TypeError at runtime.
 def get_context(
     *,
     service_name: str = ...,
     user: str,
-    conversation_function: Callable[[PamContext, tuple[struct_pam_message, ...], object], Sequence[str | None]] | None = ...,
+    conversation_function: Callable[[PamContext, tuple[struct_pam_message, ...], object], Sequence[str | None]] = ...,
     conversation_private_data: object = ...,
-    confdir: str | None = ...,
-    rhost: str | None = ...,
-    ruser: str | None = ...,
+    confdir: str = ...,
+    rhost: str = ...,
+    ruser: str = ...,
     fail_delay: int = ...,
 ) -> PamContext: ...

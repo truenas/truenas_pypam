@@ -31,14 +31,11 @@ py_tnpam_chauthtok(tnpam_ctx_t *self, PyObject *args, PyObject *kwds)
 	}
 
 	/*
-	 * Unlike account management and session setup, a password change is
-	 * inherently interactive -- pam_unix always prompts for the new token
-	 * via pam_get_authtok(). On an internal-thread context the installed
-	 * conversation parks the calling thread waiting for a response only
-	 * continue_authentication() can deliver, and the caller is the thread
-	 * that would have to deliver it, so the call would hang forever holding
-	 * the handle. Answering the prompt with a collector instead would just
-	 * fail the change with a confusing error, so refuse up front.
+	 * A password change is interactive -- pam_unix prompts for the new token
+	 * via pam_get_authtok() -- so unlike account management and session
+	 * setup it cannot use the collector conversation, which answers every
+	 * prompt with NULL. On an internal-thread context there is no way to
+	 * reach the prompt, so refuse rather than park on it holding the handle.
 	 */
 	if (self->conv_type == TNPAM_CONV_INTERNAL_THREAD) {
 		PyErr_SetString(PyExc_RuntimeError,
@@ -63,6 +60,14 @@ py_tnpam_chauthtok(tnpam_ctx_t *self, PyObject *args, PyObject *kwds)
 		if (!PyErr_Occurred()) {
 			set_pam_exc(ret, "pam_chauthtok() failed");
 		}
+		return NULL;
+	}
+
+	/*
+	 * A conversation callback can leave an exception pending even when
+	 * the stack returns PAM_SUCCESS; see py_tnpam_authenticate().
+	 */
+	if (PyErr_Occurred()) {
 		return NULL;
 	}
 
