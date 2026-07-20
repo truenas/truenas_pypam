@@ -10,7 +10,7 @@ This package provides:
 
 ## Features
 
-- Thread-safe PAM authentication with pthread locks
+- Serialized access to the PAM handle (see [Thread safety](#thread-safety))
 - Native C-threaded PAM conversation — no Python threading overhead
 - Session management (open/close)
 - Account management and validation
@@ -274,12 +274,31 @@ truenas_pypam/
 `-- setup.py                    Build configuration
 ```
 
+## Thread safety
+
+A `pam_handle_t` is not a thread-safe object. libpam does no internal locking,
+PAM transactions are sequential by contract, and its entry points reject calls
+made while a transaction is already in progress on the handle. Nothing this
+library does can change that, so **a context must be driven by one thread at a
+time.** Give each concurrent authentication its own context.
+
+What the library does provide is narrower: a per-context mutex serializes calls
+into libpam so that concurrent access cannot corrupt the handle. That matters
+even for a caller that never shares a context, because `begin_authentication()`
+spawns an internal thread which sits inside `pam_authenticate()` for the
+duration of the exchange. While that thread is running module code the handle
+belongs to it, and other calls on the context block until it parks in the
+conversation or finishes.
+
+A PAM module may itself be unsafe to run concurrently, in which case a single
+context per thread is not enough and the consumer needs one lock covering all
+contexts. Prefer not to configure such modules.
+
 ## Security Considerations
 
 - This module requires appropriate PAM configuration on the system
 - Authentication operations require appropriate privileges
 - Credentials should never be logged or stored in plain text
-- The module uses pthread locks for thread safety
 - PAM sessions should always be properly closed to avoid resource leaks
 - Deallocating a PAM context while authentication is in progress cancels
   the C auth thread cleanly before freeing resources

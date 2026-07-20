@@ -99,7 +99,20 @@ tnpam_auth_thread_func(void *arg)
 	sigfillset(&all);
 	pthread_sigmask(SIG_BLOCK, &all, NULL);
 
+	/*
+	 * Serialize against the Python-facing methods for as long as libpam is
+	 * actually executing: a PAM handle is not thread-safe, and modules mutate
+	 * items on it (pam_set_item(PAM_USER) and friends free and replace the
+	 * strings that ctx.user reads). tnpam_internal_conv() hands the lock back
+	 * while it parks, so the Python thread is still free to use the context
+	 * between begin_authentication() and continue_authentication().
+	 *
+	 * This thread has no PyThreadState, so PyMutex parks it on a plain
+	 * semaphore rather than touching the GIL.
+	 */
+	tnpam_hdl_lock(&ctx->pam_hdl_lock);
 	pamcode_t ret = pam_authenticate(ctx->hdl, ctx->conv_data.th_cb.auth_flags);
+	tnpam_hdl_unlock(&ctx->pam_hdl_lock);
 
 	pthread_mutex_lock(&ctx->conv_data.th_cb.conv_mutex);
 	ctx->conv_data.th_cb.auth_result = ret;
