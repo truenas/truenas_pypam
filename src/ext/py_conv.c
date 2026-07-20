@@ -107,7 +107,14 @@ PyObject *py_pam_msg(tnpam_state_t *state, const struct pam_message *msg)
 		return NULL;
 	}
 
-	value = PyUnicode_FromString(msg->msg);
+	/*
+	 * struct pam_message.msg is filled in by the module and libpam does not
+	 * guarantee it is non-NULL. PyUnicode_FromString() calls strlen()
+	 * unconditionally, so a module that emits an empty prompt would take
+	 * down the whole process. Treat it the same way tnpam_collect_conv()
+	 * does and substitute an empty string.
+	 */
+	value = PyUnicode_FromString(msg->msg ? msg->msg : "");
 	if (value == NULL) {
 		Py_CLEAR(entry);
 		return NULL;
@@ -175,13 +182,30 @@ PyObject *py_pam_messages_parse(int num_msg, const struct pam_message **msg)
 	return out;
 }
 
-static
+/*
+ * Free a response array, scrubbing each response first.
+ *
+ * The strings here are the answers to PAM prompts, which on the common path
+ * means the user's plaintext password. libpam scrubs before freeing in the
+ * equivalent places (pam_overwrite_string() in libpam_misc/misc_conv.c and
+ * libpam/pam_get_authtok.c), and this library's README undertakes not to keep
+ * credentials in plain text, so do the same rather than leaving them intact in
+ * a freed heap block.
+ */
 void free_pam_resp(int num_msg, struct pam_response *reply_array)
 {
 	int i;
 
+	if (reply_array == NULL) {
+		return;
+	}
+
 	for (i = 0; i < num_msg; i++) {
-		free(reply_array[i].resp);
+		if (reply_array[i].resp != NULL) {
+			explicit_bzero(reply_array[i].resp,
+				       strlen(reply_array[i].resp));
+			free(reply_array[i].resp);
+		}
 	}
 
 	free(reply_array);
@@ -361,6 +385,156 @@ tnpam_discard_conv(int num_msg, const struct pam_message **msg,
 }
 
 /*
+ * Conversation function used for synchronous PAM operations on an
+ * internal-thread context. It must not block (unlike tnpam_internal_conv,
+ * which waits for the main thread) and must not touch Python objects (the GIL
+ * is not held). Message strings are copied with PyMem_RawMalloc (GIL-free) so
+ * the caller can convert them once it has the GIL back.
+ *
+ * Note: *resp is allocated with calloc, not PyMem_Raw*, because libpam owns
+ * and frees it with free(). Responses are zero-filled; PAM_TEXT_INFO and
+ * PAM_ERROR_MSG do not require a meaningful response string.
+ */
+int
+tnpam_collect_conv(int num_msg, const struct pam_message **msg,
+		   struct pam_response **resp, void *appdata_ptr)
+{
+	struct tnpam_collected_msgs *col = appdata_ptr;
+	int i;
+
+	*resp = calloc(num_msg, sizeof(struct pam_response));
+	if (*resp == NULL) {
+		return PAM_BUF_ERR;
+	}
+
+	for (i = 0; i < num_msg; i++) {
+		const char *src = msg[i]->msg ? msg[i]->msg : "";
+		size_t len = strlen(src) + 1;
+		char *copy;
+
+		if (col->count >= TNPAM_COLLECT_MSG_BUF) {
+			break;
+		}
+
+		copy = PyMem_RawMalloc(len);
+		if (copy == NULL) {
+			/* OOM — skip this message rather than abort */
+			continue;
+		}
+		memcpy(copy, src, len);
+		col->msg_styles[col->count] = msg[i]->msg_style;
+		col->msgs[col->count] = copy;
+		col->count++;
+	}
+
+	return PAM_SUCCESS;
+}
+
+/*
+ * Convert the collected messages to Python and append them to the context's
+ * message history. Caller must hold the GIL. Always drains the buffer.
+ */
+static void
+tnpam_drain_collected(tnpam_ctx_t *ctx)
+{
+	struct tnpam_collected_msgs *col = &ctx->conv_data.th_cb.collected;
+	struct pam_message msgs_tmp[TNPAM_COLLECT_MSG_BUF];
+	const struct pam_message *msgs_ptr[TNPAM_COLLECT_MSG_BUF];
+	PyObject *pymsg;
+	int i;
+
+	if (col->count == 0) {
+		return;
+	}
+
+	for (i = 0; i < col->count; i++) {
+		msgs_tmp[i].msg_style = col->msg_styles[i];
+		msgs_tmp[i].msg = col->msgs[i];
+		msgs_ptr[i] = &msgs_tmp[i];
+	}
+
+	pymsg = py_pam_messages_parse(col->count, msgs_ptr);
+	if (pymsg != NULL) {
+		if (PyList_Append(ctx->conv_data.th_cb.messages, pymsg) < 0) {
+			PyErr_Clear();
+		}
+		Py_DECREF(pymsg);
+	} else {
+		PyErr_Clear();
+	}
+
+	for (i = 0; i < col->count; i++) {
+		PyMem_RawFree(col->msgs[i]);
+		col->msgs[i] = NULL;
+	}
+	col->count = 0;
+}
+
+bool
+tnpam_call_pam_op(tnpam_ctx_t *ctx, tnpam_pam_op_fn op, int flags,
+		  pamcode_t *out)
+{
+	pamcode_t ret;
+	pamcode_t swap_in = PAM_SUCCESS;
+	pamcode_t swap_back = PAM_SUCCESS;
+
+	if (ctx->conv_type != TNPAM_CONV_INTERNAL_THREAD) {
+		PYPAM_LOCK(ctx);
+		ret = op(ctx->hdl, flags);
+		ctx->last_pam_result = ret;
+		PYPAM_UNLOCK(ctx);
+		*out = ret;
+		return true;
+	}
+
+	/*
+	 * appdata_ptr must outlive this frame: pam_set_item() copies the
+	 * pam_conv struct (libpam/pam_item.c) but not what it points at, and a
+	 * failed restore below leaves the collector installed on the handle.
+	 */
+	struct pam_conv collect_conv = {
+		.conv = tnpam_collect_conv,
+		.appdata_ptr = &ctx->conv_data.th_cb.collected,
+	};
+
+	memset(&ctx->conv_data.th_cb.collected, 0,
+	       sizeof(ctx->conv_data.th_cb.collected));
+
+	PYPAM_LOCK(ctx);
+	swap_in = pam_set_item(ctx->hdl, PAM_CONV, &collect_conv);
+	if (swap_in == PAM_SUCCESS) {
+		ret = op(ctx->hdl, flags);
+		ctx->last_pam_result = ret;
+		swap_back = pam_set_item(ctx->hdl, PAM_CONV, &ctx->conv);
+	}
+	PYPAM_UNLOCK(ctx);
+
+	/* GIL is held again from here. */
+	if (swap_in != PAM_SUCCESS) {
+		set_pam_exc(swap_in, "pam_set_item() failed to install the "
+				     "collector conversation");
+		return false;
+	}
+
+	tnpam_drain_collected(ctx);
+
+	if (swap_back != PAM_SUCCESS) {
+		/*
+		 * The handle still has the collector installed. That is safe --
+		 * it never blocks and its buffer is owned by this context -- but
+		 * an authentication driven through it would silently answer
+		 * every prompt with NULL, so fail loudly rather than continue.
+		 */
+		set_pam_exc(swap_back, "pam_set_item() failed to restore the "
+				       "conversation");
+		return false;
+	}
+
+	*out = ret;
+	return true;
+}
+
+/*
  * Internal conversation function used in internal pthread mode. Called by
  * pam_authenticate() on the auth thread. Signals the main thread with the
  * pending messages and waits for responses — all via pure C pthreads with
@@ -407,6 +581,17 @@ tnpam_internal_conv(int num_msg, const struct pam_message **msg,
 	if (final_state != THREAD_STATE_CONV_CANCELLED) {
 		/* CONV_RESPONDED: pick up responses (ownership transferred to PAM) */
 		*resp = ctx->conv_data.th_cb.pending_resps;
+		ctx->conv_data.th_cb.pending_resps = NULL;
+	} else {
+		/*
+		 * Cancelled after continue_authentication() had already handed
+		 * us responses (it stores them, then waits with a deadline, so a
+		 * timeout can land between the two). Nobody else will consume
+		 * them, and they hold the user's plaintext password, so scrub
+		 * and free rather than leaking them for the life of the process.
+		 */
+		free_pam_resp(ctx->conv_data.th_cb.num_pending_msgs,
+			      ctx->conv_data.th_cb.pending_resps);
 		ctx->conv_data.th_cb.pending_resps = NULL;
 	}
 	pthread_mutex_unlock(&ctx->conv_data.th_cb.conv_mutex);
