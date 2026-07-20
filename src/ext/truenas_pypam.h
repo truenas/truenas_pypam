@@ -190,6 +190,30 @@ typedef struct {
 	PyObject *messages;
 } tnpam_conv_t;
 
+/*
+ * Upper bound on the messages collected from a single non-interactive PAM
+ * operation in internal-thread mode. Account management and session
+ * setup/teardown only emit informational messages (PAM_TEXT_INFO /
+ * PAM_ERROR_MSG), never interactive prompts, so eight is well beyond what any
+ * real module sends.
+ */
+#define TNPAM_COLLECT_MSG_BUF 8
+
+/*
+ * Message buffer filled by tnpam_collect_conv().
+ *
+ * This lives in the context rather than on the caller's stack on purpose. It
+ * is handed to libpam as pam_conv.appdata_ptr, and pam_set_item(PAM_CONV) can
+ * fail (it mallocs a copy, see libpam/pam_item.c), leaving the collector
+ * installed on the handle. A stack-owned buffer would then be written through
+ * by any later conversation on a frame that has already returned.
+ */
+struct tnpam_collected_msgs {
+	int count;
+	int msg_styles[TNPAM_COLLECT_MSG_BUF];
+	char *msgs[TNPAM_COLLECT_MSG_BUF];
+};
+
 /**
  * @brief Conversation state for internal pthread mode.
  *
@@ -201,6 +225,13 @@ typedef struct {
 	pthread_t auth_thread;
 	boolean_t thread_started;
 	boolean_t thread_joined;
+	/*
+	 * True once conv_mutex and both condition variables have been
+	 * successfully initialized. tp_init can fail before that point (a bad
+	 * service name fails pam_start_confdir first), and destroying a
+	 * never-initialized pthread object is undefined.
+	 */
+	boolean_t sync_ready;
 
 	/* Condition variables for conversation sync */
 	pthread_mutex_t conv_mutex;
@@ -215,6 +246,9 @@ typedef struct {
 	int auth_flags;
 	pamcode_t auth_result;
 	PyObject *messages;
+
+	/* Filled by tnpam_collect_conv() during non-interactive operations */
+	struct tnpam_collected_msgs collected;
 } tnpam_thread_conv_t;
 
 /**
@@ -445,6 +479,11 @@ PyDoc_STRVAR(py_tnpam_chauthtok__doc__,
 "1. Preliminary check - verifies the user can change their password\n"
 "2. Update phase - actually changes the password\n\n"
 "Both phases are handled internally by this single call.\n\n"
+"Requires a context created with a conversation_function. A password\n"
+"change is inherently interactive, and a context created without one\n"
+"answers prompts through begin_authentication()/continue_authentication(),\n"
+"which this call has no way to drive. Calling it on such a context raises\n"
+"RuntimeError.\n\n"
 "Parameters\n"
 "----------\n"
 "silent : bool, optional\n"
@@ -527,6 +566,41 @@ extern int truenas_pam_conv(int num_msg, const struct pam_message **msg,
 			    struct pam_response **resp, void *appdata_ptr);
 extern int tnpam_discard_conv(int num_msg, const struct pam_message **msg,
 			      struct pam_response **resp, void *appdata_ptr);
+/*
+ * Free a PAM response array, scrubbing each response string first. Safe to
+ * call with a NULL array. Touches no Python API, so it may be called from the
+ * auth thread.
+ */
+extern void free_pam_resp(int num_msg, struct pam_response *reply_array);
+
+/*
+ * Non-blocking collector conversation, used for synchronous PAM operations on
+ * an internal-thread context. Must not touch Python objects: it runs without
+ * the GIL.
+ */
+extern int tnpam_collect_conv(int num_msg, const struct pam_message **msg,
+			      struct pam_response **resp, void *appdata_ptr);
+
+/*
+ * Run a synchronous, non-interactive PAM operation (pam_acct_mgmt,
+ * pam_open_session, pam_close_session, pam_setcred) on a context.
+ *
+ * On an internal-thread context the installed conversation is
+ * tnpam_internal_conv, which parks the calling thread until
+ * continue_authentication() answers it -- and nothing will, because the caller
+ * is the thread that would have to. Any module message therefore hangs the
+ * caller forever while it holds the handle. Session modules do converse
+ * (pam_motd and pam_lastlog both call pam_info), so this is reachable from an
+ * ordinary PAM config. Swap in the non-blocking collector for the duration and
+ * append whatever the stack emitted to the context's message history.
+ *
+ * Returns true with *out set to the PAM result, or false with a Python
+ * exception set if the conversation could not be swapped.
+ */
+typedef pamcode_t (*tnpam_pam_op_fn)(pam_handle_t *, int);
+extern bool tnpam_call_pam_op(tnpam_ctx_t *ctx, tnpam_pam_op_fn op, int flags,
+			      pamcode_t *out);
+
 extern int tnpam_internal_conv(int num_msg, const struct pam_message **msg,
 			       struct pam_response **resp, void *appdata_ptr);
 extern bool parse_py_pam_resp(int num_msg, struct pam_response **resp, PyObject *pyresp);
