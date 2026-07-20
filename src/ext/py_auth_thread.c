@@ -124,9 +124,14 @@ tnpam_auth_thread_func(void *arg)
 
 /*
  * Convert a pre-parsed unsigned int timeout (0 = no timeout) into an
- * absolute CLOCK_REALTIME deadline.  Rejects values above
+ * absolute CLOCK_MONOTONIC deadline.  Rejects values above
  * TNPAM_TIMEOUT_MAX_SECS.  Returns false (with a Python exception set)
  * on error.
+ *
+ * CLOCK_MONOTONIC, matching the condition variables' clock attribute: an
+ * absolute wall-clock deadline moves when the wall clock does, so an NTP
+ * correction during a login would either fire the timeout instantly or push it
+ * out of reach.
  */
 #define TNPAM_TIMEOUT_MAX_SECS 300U
 
@@ -146,7 +151,7 @@ _tnpam_make_deadline(unsigned int secs, bool *has_timeout,
 		return false;
 	}
 
-	if (clock_gettime(CLOCK_REALTIME, deadline) != 0) {
+	if (clock_gettime(CLOCK_MONOTONIC, deadline) != 0) {
 		PyErr_SetFromErrno(PyExc_OSError);
 		return false;
 	}
@@ -200,6 +205,13 @@ _tnpam_wait_conv_or_done(tnpam_ctx_t *ctx, int wait_while_state,
 /*
  * Cancel a running auth thread. Signals the auth thread if it is blocked in
  * tnpam_internal_conv (CONV_PENDING), then joins. GIL is held on entry.
+ *
+ * Note the join is not bounded. A PAM module cannot be safely aborted mid-call
+ * -- pthread_cancel() would leave the handle and the module's own state
+ * inconsistent -- so cancellation can only take effect once the module next
+ * returns to our conversation function. If a module is wedged in I/O the join
+ * waits for it. The timeout therefore bounds the conversation round trip, not
+ * an unresponsive module; see the begin_authentication() documentation.
  */
 static void
 _tnpam_cancel_auth_thread(tnpam_ctx_t *ctx)
@@ -216,6 +228,14 @@ _tnpam_cancel_auth_thread(tnpam_ctx_t *ctx)
 	Py_END_ALLOW_THREADS
 
 	ctx->conv_data.th_cb.thread_joined = B_TRUE;
+
+	/*
+	 * Carry the real pam_authenticate() result forward so pam_end() is told
+	 * the authentication failed. Leaving last_pam_result at its PAM_SUCCESS
+	 * default reports an abandoned or timed-out login to every module's
+	 * cleanup handler as a completed one.
+	 */
+	ctx->last_pam_result = ctx->conv_data.th_cb.auth_result;
 }
 
 /*
