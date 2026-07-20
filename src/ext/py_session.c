@@ -38,10 +38,9 @@ py_tnpam_open_session(tnpam_ctx_t *self, PyObject *args, PyObject *kwds)
 		return NULL;
 	}
 
-	PYPAM_LOCK(self);
-	ret = pam_open_session(self->hdl, flags);
-	self->last_pam_result = ret;
-	PYPAM_UNLOCK(self);
+	if (!tnpam_call_pam_op(self, pam_open_session, flags, &ret)) {
+		return NULL;
+	}
 
 	if (ret != PAM_SUCCESS) {
 		if (!PyErr_Occurred()) {
@@ -83,10 +82,9 @@ py_tnpam_close_session(tnpam_ctx_t *self, PyObject *args, PyObject *kwds)
 		return NULL;
 	}
 
-	PYPAM_LOCK(self);
-	ret = pam_close_session(self->hdl, flags);
-	self->last_pam_result = ret;
-	PYPAM_UNLOCK(self);
+	if (!tnpam_call_pam_op(self, pam_close_session, flags, &ret)) {
+		return NULL;
+	}
 
 	if (ret != PAM_SUCCESS) {
 		if (!PyErr_Occurred()) {

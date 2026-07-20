@@ -32,6 +32,21 @@ py_tnpam_ctx_init(tnpam_ctx_t *self, PyObject *args, PyObject *kwds)
 	pamcode_t ret, err = 0;
 	const char *msg = NULL;
 
+	/*
+	 * __init__ is an ordinary method and nothing in CPython stops a caller
+	 * invoking it twice (Objects/typeobject.c wrap_init()). A second pass
+	 * would overwrite self->hdl without pam_end()ing the first handle,
+	 * overwrite the Python references without releasing them, and re-run
+	 * pthread_*_init on live primitives -- possibly underneath a parked auth
+	 * thread. tp_alloc() zeroes the struct, so a NULL handle means
+	 * uninitialized.
+	 */
+	if (self->hdl != NULL) {
+		PyErr_SetString(PyExc_RuntimeError,
+				"PamContext is already initialized");
+		return -1;
+	}
+
 	if (!PyArg_ParseTupleAndKeywords(args, kwds, "|$ssOOsssI", kwlist,
 					 &cfg.service,
 					 &cfg.user,
@@ -96,10 +111,30 @@ py_tnpam_ctx_init(tnpam_ctx_t *self, PyObject *args, PyObject *kwds)
 		   ((ret = pam_fail_delay(self->hdl, cfg.fail_delay) != PAM_SUCCESS))) {
 		msg = "pam_fail_delay() failed";
 	} else if (self->conv_type == TNPAM_CONV_INTERNAL_THREAD) {
-		/* pam_hdl_lock is a PyMutex: zero-initialized by tp_alloc() */
-		err = pthread_mutex_init(&self->conv_data.th_cb.conv_mutex, NULL);
-		if (!err) err = pthread_cond_init(&self->conv_data.th_cb.conv_cond_main, NULL);
-		if (!err) err = pthread_cond_init(&self->conv_data.th_cb.conv_cond_auth, NULL);
+		/*
+		 * pam_hdl_lock is a PyMutex: zero-initialized by tp_alloc().
+		 *
+		 * The condition variables are given a CLOCK_MONOTONIC attribute
+		 * so their absolute deadlines are immune to wall-clock steps. A
+		 * default-attribute condvar waits on CLOCK_REALTIME, where an
+		 * NTP correction mid-login either expires the deadline
+		 * immediately (spurious TimeoutError on a login the user
+		 * answered promptly) or pushes it hours into the future,
+		 * silently disabling the timeout.
+		 */
+		pthread_condattr_t cattr;
+
+		err = pthread_condattr_init(&cattr);
+		if (!err) {
+			err = pthread_condattr_setclock(&cattr, CLOCK_MONOTONIC);
+			if (!err) err = pthread_mutex_init(&self->conv_data.th_cb.conv_mutex, NULL);
+			if (!err) err = pthread_cond_init(&self->conv_data.th_cb.conv_cond_main, &cattr);
+			if (!err) err = pthread_cond_init(&self->conv_data.th_cb.conv_cond_auth, &cattr);
+			pthread_condattr_destroy(&cattr);
+		}
+		if (!err) {
+			self->conv_data.th_cb.sync_ready = B_TRUE;
+		}
 	}
 	Py_END_ALLOW_THREADS
 
@@ -144,28 +179,41 @@ cleanup:
 	return -1;
 }
 
-static void
-py_tnpam_ctx_dealloc(tnpam_ctx_t *self)
+/*
+ * The context stores strong references to arbitrary caller-supplied objects
+ * (the conversation callback and its private data), so by CPython's definition
+ * it is a container type and has to participate in cycle collection. The
+ * natural stateful-callback idiom -- an object that owns a context and hands it
+ * a bound method -- forms a cycle through the context, and without traverse and
+ * clear the collector cannot see it: tp_dealloc never runs, so pam_end() is
+ * never called and the modules' cleanup handlers never run, at shutdown
+ * included.
+ *
+ * conv_data is a union, so both callbacks must switch on conv_type; visiting
+ * the wrong arm would hand the collector a pointer read out of the wrong
+ * struct layout.
+ */
+static int
+py_tnpam_ctx_traverse(tnpam_ctx_t *self, visitproc visit, void *arg)
 {
-	if (self->conv_type == TNPAM_CONV_INTERNAL_THREAD) {
-		if (self->conv_data.th_cb.thread_started && !self->conv_data.th_cb.thread_joined) {
-			/* Signal and join a pending auth thread */
-			pthread_mutex_lock(&self->conv_data.th_cb.conv_mutex);
-			self->conv_data.th_cb.conv_state = THREAD_STATE_CONV_CANCELLED;
-			pthread_cond_signal(&self->conv_data.th_cb.conv_cond_auth);
-			pthread_mutex_unlock(&self->conv_data.th_cb.conv_mutex);
-			pthread_join(self->conv_data.th_cb.auth_thread, NULL);
-		}
-		pthread_cond_destroy(&self->conv_data.th_cb.conv_cond_auth);
-		pthread_cond_destroy(&self->conv_data.th_cb.conv_cond_main);
-		pthread_mutex_destroy(&self->conv_data.th_cb.conv_mutex);
+	Py_VISIT(self->user);
+
+	if (self->conv_type == TNPAM_CONV_CALLBACK) {
+		Py_VISIT(self->conv_data.py_cb.callback_fn);
+		Py_VISIT(self->conv_data.py_cb.private_data);
+		Py_VISIT(self->conv_data.py_cb.messages);
+	} else {
+		Py_VISIT(self->conv_data.th_cb.messages);
 	}
 
-	if (self->hdl != NULL) {
-		pam_end(self->hdl, self->last_pam_result);
-		self->hdl = NULL;
-	}
+	return 0;
+}
+
+static int
+py_tnpam_ctx_clear(tnpam_ctx_t *self)
+{
 	Py_CLEAR(self->user);
+
 	if (self->conv_type == TNPAM_CONV_CALLBACK) {
 		Py_CLEAR(self->conv_data.py_cb.callback_fn);
 		Py_CLEAR(self->conv_data.py_cb.private_data);
@@ -173,7 +221,72 @@ py_tnpam_ctx_dealloc(tnpam_ctx_t *self)
 	} else {
 		Py_CLEAR(self->conv_data.th_cb.messages);
 	}
+
+	return 0;
+}
+
+static void
+py_tnpam_ctx_dealloc(tnpam_ctx_t *self)
+{
+	PyObject_GC_UnTrack(self);
+
+	if (self->conv_type == TNPAM_CONV_INTERNAL_THREAD) {
+		tnpam_thread_conv_t *th = &self->conv_data.th_cb;
+
+		if (th->thread_started && !th->thread_joined) {
+			/*
+			 * Cancel and join without the GIL. pam_authenticate()
+			 * does not return until the module unwinds, and the
+			 * fail delay a module registers is slept inside it
+			 * (pam_unix registers two seconds, see
+			 * modules/pam_unix/support.c and libpam/pam_delay.c),
+			 * so holding the GIL across this freezes every Python
+			 * thread in the process -- indefinitely if a module is
+			 * wedged in network I/O. The timeout path already
+			 * releases it; this one did not.
+			 */
+			Py_BEGIN_ALLOW_THREADS
+			pthread_mutex_lock(&th->conv_mutex);
+			th->conv_state = THREAD_STATE_CONV_CANCELLED;
+			pthread_cond_signal(&th->conv_cond_auth);
+			pthread_mutex_unlock(&th->conv_mutex);
+			pthread_join(th->auth_thread, NULL);
+			Py_END_ALLOW_THREADS
+			th->thread_joined = B_TRUE;
+
+			/*
+			 * pam_end() is contractually given the result of the
+			 * last PAM call. Modules receive that status in their
+			 * cleanup handlers and some persist state only when it
+			 * says the transaction succeeded, so reporting the
+			 * default PAM_SUCCESS for an abandoned authentication
+			 * makes a failed login look like a completed one.
+			 */
+			self->last_pam_result = th->auth_result;
+		}
+
+		/*
+		 * Responses continue_authentication() handed over that the
+		 * conversation never consumed -- they hold the user's plaintext
+		 * password.
+		 */
+		free_pam_resp(th->num_pending_msgs, th->pending_resps);
+		th->pending_resps = NULL;
+
+		if (th->sync_ready) {
+			pthread_cond_destroy(&th->conv_cond_auth);
+			pthread_cond_destroy(&th->conv_cond_main);
+			pthread_mutex_destroy(&th->conv_mutex);
+		}
+	}
+
+	if (self->hdl != NULL) {
+		pam_end(self->hdl, self->last_pam_result);
+		self->hdl = NULL;
+	}
+
 	/* conv.appdata_ptr is a borrowed reference, no need to clear */
+	py_tnpam_ctx_clear(self);
 
 	Py_TYPE(self)->tp_free((PyObject *)self);
 }
@@ -488,6 +601,14 @@ PyDoc_STRVAR(py_tnpam_begin_authentication__doc__,
 "timeout : int, optional\n"
 "    Maximum seconds to wait for the first conversation or completion.\n"
 "    0 means wait indefinitely (default=0). Maximum is 300.\n\n"
+"    The timeout bounds the wait for the PAM stack to reach its next\n"
+"    conversation or finish; it does not bound an unresponsive module. A\n"
+"    module cannot be aborted mid-call without leaving the PAM handle and\n"
+"    the module's own state inconsistent, so cancellation only takes effect\n"
+"    once the module next returns. If one is wedged in I/O -- an\n"
+"    unreachable directory server, say -- TimeoutError is raised only when\n"
+"    it finally returns. Measured against a monotonic clock, so adjusting\n"
+"    the system time does not affect it.\n\n"
 "Returns\n"
 "-------\n"
 "tuple of struct_pam_message\n"
@@ -671,10 +792,12 @@ PyTypeObject PyPamCtx_Type = {
 	.tp_doc = PyPamCtx_Type__doc__,
 	.tp_basicsize = sizeof(tnpam_ctx_t),
 	.tp_itemsize = 0,
-	.tp_flags = Py_TPFLAGS_DEFAULT,
+	.tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC,
 	.tp_new = PyType_GenericNew,
 	.tp_init = (initproc)py_tnpam_ctx_init,
 	.tp_dealloc = (destructor)py_tnpam_ctx_dealloc,
+	.tp_traverse = (traverseproc)py_tnpam_ctx_traverse,
+	.tp_clear = (inquiry)py_tnpam_ctx_clear,
 	//.tp_repr = (reprfunc)py_tnpam_ctx_repr,
 	.tp_methods = py_tnpam_ctx_methods,
 	.tp_getset = py_tnpam_ctx_getsetters,

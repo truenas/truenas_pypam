@@ -159,10 +159,9 @@ PyObject *py_tnpam_setcred(tnpam_ctx_t *self, PyObject *args, PyObject *kwds)
 		return NULL;
 	}
 
-	PYPAM_LOCK(self);
-	retval = pam_setcred(self->hdl, flags);
-	self->last_pam_result = retval;
-	PYPAM_UNLOCK(self);
+	if (!tnpam_call_pam_op(self, pam_setcred, flags, &retval)) {
+		return NULL;
+	}
 
 	if (retval != PAM_SUCCESS) {
 		if (!PyErr_Occurred()) {
