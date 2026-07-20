@@ -95,13 +95,11 @@ py_tnpam_ctx_init(tnpam_ctx_t *self, PyObject *args, PyObject *kwds)
 	} else if (cfg.fail_delay &&
 		   ((ret = pam_fail_delay(self->hdl, cfg.fail_delay) != PAM_SUCCESS))) {
 		msg = "pam_fail_delay() failed";
-	} else {
-		err = pthread_mutex_init(&self->pam_hdl_lock, NULL);
-		if (!err && self->conv_type == TNPAM_CONV_INTERNAL_THREAD) {
-			err = pthread_mutex_init(&self->conv_data.th_cb.conv_mutex, NULL);
-			if (!err) err = pthread_cond_init(&self->conv_data.th_cb.conv_cond_main, NULL);
-			if (!err) err = pthread_cond_init(&self->conv_data.th_cb.conv_cond_auth, NULL);
-		}
+	} else if (self->conv_type == TNPAM_CONV_INTERNAL_THREAD) {
+		/* pam_hdl_lock is a PyMutex: zero-initialized by tp_alloc() */
+		err = pthread_mutex_init(&self->conv_data.th_cb.conv_mutex, NULL);
+		if (!err) err = pthread_cond_init(&self->conv_data.th_cb.conv_cond_main, NULL);
+		if (!err) err = pthread_cond_init(&self->conv_data.th_cb.conv_cond_auth, NULL);
 	}
 	Py_END_ALLOW_THREADS
 
@@ -120,7 +118,7 @@ py_tnpam_ctx_init(tnpam_ctx_t *self, PyObject *args, PyObject *kwds)
 	// Store username for audit logging
 	self->user = PyUnicode_FromString(cfg.user);
 	if (self->user == NULL) {
-		goto cleanup_mutex;
+		goto cleanup;
 	}
 
 	// Initialize last_pam_result to PAM_SUCCESS
@@ -131,8 +129,6 @@ py_tnpam_ctx_init(tnpam_ctx_t *self, PyObject *args, PyObject *kwds)
 
 	return 0;
 
-cleanup_mutex:
-	pthread_mutex_destroy(&self->pam_hdl_lock);
 cleanup:
 	if (self->hdl != NULL) {
 		pam_end(self->hdl, PAM_ABORT);
@@ -169,7 +165,6 @@ py_tnpam_ctx_dealloc(tnpam_ctx_t *self)
 		pam_end(self->hdl, self->last_pam_result);
 		self->hdl = NULL;
 	}
-	pthread_mutex_destroy(&self->pam_hdl_lock);
 	Py_CLEAR(self->user);
 	if (self->conv_type == TNPAM_CONV_CALLBACK) {
 		Py_CLEAR(self->conv_data.py_cb.callback_fn);
@@ -655,9 +650,13 @@ PyDoc_STRVAR(PyPamCtx_Type__doc__,
 "This object wraps a PAM handle (pam_handle_t) and provides methods for\n"
 "performing PAM operations such as authentication and environment variable\n"
 "management. The context automatically manages the PAM handle lifecycle.\n\n"
-"The context maintains thread safety by using mutex locks around PAM\n"
-"operations, as PAM handles are not thread-safe. It also manages the\n"
-"Python GIL properly during PAM conversation callbacks.\n\n"
+"A PAM handle is not thread-safe and a context must be driven by one\n"
+"thread at a time; use a separate context per concurrent authentication.\n"
+"A mutex serializes calls into libpam so that concurrent access cannot\n"
+"corrupt the handle -- including against the internal thread that runs\n"
+"pam_authenticate() for begin_authentication() -- but it does not make a\n"
+"context safe to share. The context also manages the Python GIL properly\n"
+"during PAM conversation callbacks.\n\n"
 "Parameters are the same as get_context(). See get_context() for\n"
 "detailed parameter documentation.\n"
 );
