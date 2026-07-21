@@ -11,7 +11,7 @@ typedef struct {
 	PyObject *private_data;
 	const char *ruser;
 	const char *rhost;
-	uint32_t fail_delay;
+	int fail_delay;
 } tnpam_cfg_t;
 
 static int
@@ -47,7 +47,7 @@ py_tnpam_ctx_init(tnpam_ctx_t *self, PyObject *args, PyObject *kwds)
 		return -1;
 	}
 
-	if (!PyArg_ParseTupleAndKeywords(args, kwds, "|$ssOOsssI", kwlist,
+	if (!PyArg_ParseTupleAndKeywords(args, kwds, "|$ssOOsssi", kwlist,
 					 &cfg.service,
 					 &cfg.user,
 					 &cfg.conv_fn,
@@ -61,6 +61,15 @@ py_tnpam_ctx_init(tnpam_ctx_t *self, PyObject *args, PyObject *kwds)
 
 	if (cfg.user == NULL) {
 		PyErr_SetString(PyExc_ValueError, "user is required");
+		return -1;
+	}
+
+	/*
+	 * Parsed with "i", not "I": "I" masks out-of-range values via
+	 * PyLong_AsUnsignedLongMask() instead of raising.
+	 */
+	if (cfg.fail_delay < 0) {
+		PyErr_SetString(PyExc_ValueError, "fail_delay must not be negative");
 		return -1;
 	}
 
@@ -180,18 +189,15 @@ cleanup:
 }
 
 /*
- * The context stores strong references to arbitrary caller-supplied objects
- * (the conversation callback and its private data), so by CPython's definition
- * it is a container type and has to participate in cycle collection. The
- * natural stateful-callback idiom -- an object that owns a context and hands it
- * a bound method -- forms a cycle through the context, and without traverse and
- * clear the collector cannot see it: tp_dealloc never runs, so pam_end() is
- * never called and the modules' cleanup handlers never run, at shutdown
- * included.
+ * The context holds strong references to caller-supplied objects (the
+ * conversation callback and its private data), making it a container type that
+ * must participate in cycle collection. An object that owns a context and hands
+ * it a bound method forms a cycle through it; a context the collector cannot
+ * traverse is never deallocated, so pam_end() and the modules' cleanup handlers
+ * never run, at shutdown included.
  *
- * conv_data is a union, so both callbacks must switch on conv_type; visiting
- * the wrong arm would hand the collector a pointer read out of the wrong
- * struct layout.
+ * conv_data is a union: both callbacks must switch on conv_type, or the
+ * collector is handed a pointer read out of the wrong struct layout.
  */
 static int
 py_tnpam_ctx_traverse(tnpam_ctx_t *self, visitproc visit, void *arg)
@@ -236,14 +242,13 @@ py_tnpam_ctx_dealloc(tnpam_ctx_t *self)
 		if (th->thread_started && !th->thread_joined) {
 			/*
 			 * Cancel and join without the GIL. pam_authenticate()
-			 * does not return until the module unwinds, and the
-			 * fail delay a module registers is slept inside it
+			 * does not return until the module unwinds, and a
+			 * module's registered fail delay is slept inside it
 			 * (pam_unix registers two seconds, see
 			 * modules/pam_unix/support.c and libpam/pam_delay.c),
-			 * so holding the GIL across this freezes every Python
-			 * thread in the process -- indefinitely if a module is
-			 * wedged in network I/O. The timeout path already
-			 * releases it; this one did not.
+			 * so holding the GIL here freezes every Python thread
+			 * in the process -- indefinitely against a module
+			 * wedged in network I/O.
 			 */
 			Py_BEGIN_ALLOW_THREADS
 			pthread_mutex_lock(&th->conv_mutex);
@@ -386,6 +391,19 @@ py_tnpam_ctx_set_user(tnpam_ctx_t *self, PyObject *value, void *closure)
 
 	if (!PyUnicode_Check(value)) {
 		PyErr_SetString(PyExc_TypeError, "user must be a string");
+		return -1;
+	}
+
+	/*
+	 * open_session() and setcred() gate only on the authenticated flag and
+	 * never re-check who authenticated, so repointing PAM_USER afterwards
+	 * would establish a session and credentials for a principal that never
+	 * authenticated. Nothing needs to rename a context mid-transaction, so
+	 * refuse rather than try to keep the two in step.
+	 */
+	if (self->authenticated) {
+		PyErr_SetString(PyExc_RuntimeError,
+				"user cannot be changed after authentication");
 		return -1;
 	}
 

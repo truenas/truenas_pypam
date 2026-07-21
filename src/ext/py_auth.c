@@ -57,6 +57,17 @@ py_tnpam_authenticate(tnpam_ctx_t *self, PyObject *args, PyObject *kwds)
 		return NULL;
 	}
 
+	/*
+	 * PAM_SUCCESS does not mean the conversation was clean: a module may
+	 * ignore the return of a pam_info()/pam_error() delivery, so a callback
+	 * that raised while answering one leaves an exception pending on a
+	 * successful stack. Propagate it, and leave the context unauthenticated
+	 * so open_session() stays refused.
+	 */
+	if (PyErr_Occurred()) {
+		return NULL;
+	}
+
 	self->authenticated = B_TRUE;
 	Py_RETURN_NONE;
 }

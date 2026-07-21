@@ -1,5 +1,6 @@
 """Tests for truenas_pypam enum functionality."""
 
+import pickle
 import pytest
 import truenas_pypam
 
@@ -127,13 +128,46 @@ def test_cred_op_enum_values(member_name, expected_value):
 
 
 @pytest.mark.parametrize("enum_type,expected_name", [
-    (truenas_pypam.PAMCode, 'truenas_pypam.PAMCode'),
-    (truenas_pypam.MSGStyle, 'truenas_pypam.MSGStyle'),
-    (truenas_pypam.CredOp, 'truenas_pypam.CredOp'),
+    (truenas_pypam.PAMCode, 'PAMCode'),
+    (truenas_pypam.MSGStyle, 'MSGStyle'),
+    (truenas_pypam.CredOp, 'CredOp'),
 ])
 def test_enum_name_attributes(enum_type, expected_name):
-    """Test enum name attributes are correct."""
+    """Enum identity must be the plain name in this module, not a mangled one.
+
+    Embedding the module in __name__ leaves __module__ pointing at importlib's
+    bootstrap, which is where pickle looks the class up.
+    """
     assert enum_type.__name__ == expected_name
+    assert enum_type.__qualname__ == expected_name
+    assert enum_type.__module__ == 'truenas_pypam'
+
+
+@pytest.mark.parametrize("enum_type", [
+    truenas_pypam.PAMCode,
+    truenas_pypam.MSGStyle,
+    truenas_pypam.CredOp,
+])
+def test_enum_members_are_picklable(enum_type):
+    """Members cross a process boundary; consumers put them in job results."""
+    for member in enum_type:
+        assert pickle.loads(pickle.dumps(member)) is member
+
+
+def test_pam_error_is_picklable():
+    """A raised PAMError carries a PAMCode in its instance dict."""
+    ctx = truenas_pypam.get_context(
+        user='bob',
+        service_name='no-such-service',
+        conversation_function=lambda ctx, messages, private_data: [None] * len(messages),
+    )
+    try:
+        ctx.authenticate()
+    except truenas_pypam.PAMError as exc:
+        restored = pickle.loads(pickle.dumps(exc))
+        assert restored.code == exc.code
+    else:
+        pytest.fail('expected PAMError for an unknown service')
 
 
 def test_enum_member_comparison():

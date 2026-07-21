@@ -202,11 +202,10 @@ typedef struct {
 /*
  * Message buffer filled by tnpam_collect_conv().
  *
- * This lives in the context rather than on the caller's stack on purpose. It
- * is handed to libpam as pam_conv.appdata_ptr, and pam_set_item(PAM_CONV) can
- * fail (it mallocs a copy, see libpam/pam_item.c), leaving the collector
- * installed on the handle. A stack-owned buffer would then be written through
- * by any later conversation on a frame that has already returned.
+ * Must outlive the call that installs it: it is handed to libpam as
+ * pam_conv.appdata_ptr, and pam_set_item(PAM_CONV) can fail while restoring
+ * (libpam/pam_item.c), leaving the collector on the handle. Hence a context
+ * field rather than a caller's local.
  */
 struct tnpam_collected_msgs {
 	int count;
@@ -585,14 +584,12 @@ extern int tnpam_collect_conv(int num_msg, const struct pam_message **msg,
  * Run a synchronous, non-interactive PAM operation (pam_acct_mgmt,
  * pam_open_session, pam_close_session, pam_setcred) on a context.
  *
- * On an internal-thread context the installed conversation is
- * tnpam_internal_conv, which parks the calling thread until
- * continue_authentication() answers it -- and nothing will, because the caller
- * is the thread that would have to. Any module message therefore hangs the
- * caller forever while it holds the handle. Session modules do converse
- * (pam_motd and pam_lastlog both call pam_info), so this is reachable from an
- * ordinary PAM config. Swap in the non-blocking collector for the duration and
- * append whatever the stack emitted to the context's message history.
+ * On an internal-thread context tnpam_internal_conv is installed, and it parks
+ * the calling thread until continue_authentication() answers -- which the
+ * caller cannot do, being that thread. Any module message would hang it while
+ * it holds the handle, and session modules do converse (pam_motd and
+ * pam_lastlog call pam_info). So swap in the non-blocking collector for the
+ * duration and append what the stack emitted to the message history.
  *
  * Returns true with *out set to the PAM result, or false with a Python
  * exception set if the conversation could not be swapped.
@@ -611,6 +608,12 @@ extern bool init_pam_conv_struct(PyObject *module_ref);
 extern bool setup_pam_exception(PyObject *module_ref);
 extern PyObject *py_pamcode_dict(void);
 extern void _set_pam_exc(int code, const char *additional_info, const char *location);
+
+/*
+ * Build an IntEnum from a name -> value mapping, with __module__ and
+ * __qualname__ set explicitly so members stay picklable.
+ */
+extern PyObject *py_build_int_enum(const char *name, PyObject *members);
 
 #define set_pam_exc(code, additional_info) \
 	_set_pam_exc(code, additional_info, __location__)

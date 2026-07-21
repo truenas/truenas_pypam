@@ -21,7 +21,6 @@ create_msg_style_enum(void)
 	PyObject *enum_module = NULL;
 	PyObject *int_enum_class = NULL;
 	PyObject *enum_dict = NULL;
-	PyObject *py_enum_name = NULL;
 	PyObject *result_enum = NULL;
 	size_t i;
 
@@ -57,17 +56,8 @@ create_msg_style_enum(void)
 		Py_DECREF(py_value);
 	}
 
-	py_enum_name = PyUnicode_FromString(MODULE_NAME ".MSGStyle");
-	if (py_enum_name == NULL) {
-		Py_DECREF(enum_dict);
-		Py_DECREF(int_enum_class);
-		return NULL;
-	}
+	result_enum = py_build_int_enum("MSGStyle", enum_dict);
 
-	result_enum = PyObject_CallFunction(int_enum_class, "OO",
-					    py_enum_name, enum_dict);
-
-	Py_DECREF(py_enum_name);
 	Py_DECREF(enum_dict);
 	Py_DECREF(int_enum_class);
 
@@ -284,6 +274,19 @@ bool parse_py_pam_resp(int num_msg, struct pam_response **resp, PyObject *pyresp
 	}
 
 	Py_DECREF(iterator);
+
+	/*
+	 * PyIter_Next() returns NULL both when the iterator is exhausted and
+	 * when it raised. Without this check a generator that yields num_msg
+	 * responses and then raises looks like a complete, successful response
+	 * set: the responses go to PAM, authentication proceeds, and the method
+	 * later returns a value with an exception still set, which CPython
+	 * converts into SystemError.
+	 */
+	if (PyErr_Occurred()) {
+		free_pam_resp(num_msg, reply);
+		return false;
+	}
 
 	if (i != num_msg) {
 		free_pam_resp(num_msg, reply);
@@ -564,12 +567,11 @@ tnpam_internal_conv(int num_msg, const struct pam_message **msg,
 	pthread_cond_signal(&ctx->conv_data.th_cb.conv_cond_main);  /* wake main thread */
 
 	/*
-	 * Hand the PAM handle back while we are parked. The pam_*() call that
-	 * drove this conversation is suspended here, inside our own conversation
-	 * function, so no module code can touch the handle until we return, and
-	 * the Python thread composing the response is free to use the context in
-	 * the meantime. Dropped before the wait and retaken only after conv_mutex
-	 * is released, so the lock order is always pam_hdl_lock -> conv_mutex.
+	 * Hand the PAM handle back while parked. The pam_*() call that drove
+	 * this conversation is suspended inside this function, so no module code
+	 * can touch the handle until we return, and the Python thread composing
+	 * the response stays free to use the context. Retaken only after
+	 * conv_mutex is released, keeping the order pam_hdl_lock -> conv_mutex.
 	 */
 	tnpam_hdl_unlock(&ctx->pam_hdl_lock);
 
